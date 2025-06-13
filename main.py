@@ -76,7 +76,8 @@ class AIBot:
     async def run(self):
         await self.setup_bot()
         logger.info(f"Запуск бота: {self.config['bot']['name']}")
-        # Запускаем бота
+        await self.app.initialize()
+        await self.app.start()
         await self.app.run_polling(allowed_updates=['message', 'callback_query'], drop_pending_updates=True)
 
 def main():
