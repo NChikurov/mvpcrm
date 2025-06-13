@@ -13,7 +13,7 @@ from database.operations import (
     get_user_messages
 )
 from database.models import User, Message
-from ai.claude_client import init_claude_client, get_claude_client
+from ai.claude_client import get_claude_client
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +25,15 @@ class UserHandler:
         self.messages_config = config.get('messages', {})
         self.features = config.get('features', {})
         
-        # Инициализация Claude клиента
-        try:
-            init_claude_client(config)
-            logger.info("Claude клиент инициализирован в UserHandler")
-        except Exception as e:
-            logger.error(f"Ошибка инициализации Claude клиента: {e}")
-        
         # Callback handler
         self.callback_handler = CallbackQueryHandler(self.handle_callback)
+        
+        logger.info("UserHandler инициализирован")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /start"""
         try:
-            logger.info(f"Команда /start от пользователя {update.effective_user.id}")
+            logger.info(f"Команда /start от пользователя {update.effective_user.id} (@{update.effective_user.username})")
             
             user_data = update.effective_user
             
@@ -102,7 +97,7 @@ class UserHandler:
             user_data = update.effective_user
             message_text = update.message.text
             
-            logger.info(f"Сообщение от пользователя {user_data.id}: {message_text[:50]}...")
+            logger.info(f"Личное сообщение от {user_data.id} (@{user_data.username}): {message_text[:50]}...")
             
             # Получаем пользователя из БД
             user = await get_user_by_telegram_id(user_data.id)
@@ -130,13 +125,13 @@ class UserHandler:
                 if claude_client:
                     # Получаем контекст предыдущих сообщений
                     recent_messages = await get_user_messages(user.id, limit=5)
-                    context = [msg.text for msg in recent_messages if msg.text]
+                    context_list = [msg.text for msg in recent_messages if msg.text]
                     
                     # Анализируем заинтересованность
-                    interest_score = await claude_client.analyze_user_interest(message_text, context)
+                    interest_score = await claude_client.analyze_user_interest(message_text, context_list)
                     
                     # Генерируем ответ
-                    response_text = await claude_client.generate_response(message_text, context, interest_score)
+                    response_text = await claude_client.generate_response(message_text, context_list, interest_score)
                     
                     ai_analysis = f"Interest: {interest_score}/100"
                     
@@ -145,6 +140,10 @@ class UserHandler:
                         await update_user_interest_score(user_data.id, interest_score)
                     
                     logger.info(f"AI анализ: score={interest_score}")
+                else:
+                    logger.info("Claude API недоступен, используем простой анализ")
+                    interest_score = self._simple_interest_analysis(message_text)
+                    response_text = self._simple_response_generation(message_text, interest_score)
                 
             except Exception as e:
                 logger.error(f"Ошибка AI анализа: {e}")
@@ -152,36 +151,38 @@ class UserHandler:
                 interest_score = self._simple_interest_analysis(message_text)
                 response_text = self._simple_response_generation(message_text, interest_score)
             
-            # Сохраняем сообщение в БД
-            try:
-                message = Message(
-                    user_id=user.id,
-                    telegram_message_id=update.message.message_id,
-                    text=message_text,
-                    ai_analysis=ai_analysis,
-                    interest_score=interest_score,
-                    response_sent=True
+            # Сохраняем сообщение в БД если включено
+            if self.features.get('save_all_messages', True):
+                try:
+                    message = Message(
+                        user_id=user.id,
+                        telegram_message_id=update.message.message_id,
+                        text=message_text,
+                        ai_analysis=ai_analysis,
+                        interest_score=interest_score,
+                        response_sent=True
+                    )
+                    await create_message(message)
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения сообщения: {e}")
+            
+            # Отправляем ответ если включены автоответы
+            if self.features.get('auto_response', True):
+                keyboard = None
+                if interest_score >= 70:  # Высокая заинтересованность
+                    keyboard = self._get_interested_user_keyboard()
+                elif interest_score <= 30:  # Низкая заинтересованность
+                    keyboard = self._get_help_keyboard()
+                else:  # Средняя заинтересованность
+                    keyboard = self._get_main_keyboard()
+                
+                await update.message.reply_text(
+                    response_text,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
                 )
-                await create_message(message)
-            except Exception as e:
-                logger.error(f"Ошибка сохранения сообщения: {e}")
-            
-            # Отправляем ответ с соответствующей клавиатурой
-            keyboard = None
-            if interest_score >= 70:  # Высокая заинтересованность
-                keyboard = self._get_interested_user_keyboard()
-            elif interest_score <= 30:  # Низкая заинтересованность
-                keyboard = self._get_help_keyboard()
-            else:  # Средняя заинтересованность
-                keyboard = self._get_main_keyboard()
-            
-            await update.message.reply_text(
-                response_text,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
-            
-            logger.info(f"Ответ отправлен пользователю {user_data.id}: score={interest_score}")
+                
+                logger.info(f"Ответ отправлен пользователю {user_data.id}: score={interest_score}")
             
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения: {e}")
@@ -198,11 +199,11 @@ class UserHandler:
         message_lower = message.lower()
         
         # Высокий интерес
-        high_words = ['купить', 'заказать', 'цена', 'стоимость', 'сколько стоит']
+        high_words = ['купить', 'заказать', 'цена', 'стоимость', 'сколько стоит', 'готов купить']
         # Средний интерес
-        medium_words = ['интересно', 'подробнее', 'расскажите', 'как работает']
+        medium_words = ['интересно', 'подробнее', 'расскажите', 'как работает', 'хочу узнать']
         # Низкий интерес
-        low_words = ['дорого', 'не нужно', 'не интересно']
+        low_words = ['дорого', 'не нужно', 'не интересно', 'спам']
         
         for word in high_words:
             if word in message_lower:
@@ -216,7 +217,11 @@ class UserHandler:
             if word in message_lower:
                 return 20
         
-        return 50
+        # Если есть вопрос - средний интерес
+        if '?' in message or any(word in message_lower for word in ['как', 'что', 'где', 'когда']):
+            return 50
+        
+        return 40
 
     def _simple_response_generation(self, message: str, interest_score: int) -> str:
         """Простая генерация ответа без AI"""

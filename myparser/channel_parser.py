@@ -5,9 +5,9 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import List, Optional
-from telegram import Bot
-from telegram.error import TelegramError
+from typing import List, Optional, Dict, Any
+from telegram import Update
+from telegram.ext import ContextTypes
 
 from database.operations import (
     create_or_update_channel, get_active_channels, create_lead,
@@ -19,13 +19,11 @@ from ai.claude_client import get_claude_client
 logger = logging.getLogger(__name__)
 
 class ChannelParser:
-    """Парсер каналов для поиска лидов через Bot API"""
+    """Парсер каналов для поиска лидов"""
     
     def __init__(self, config):
         self.config = config
         self.parsing_config = config.get('parsing', {})
-        self.is_running = False
-        self.bot = None
         
         # Настройки парсинга
         self.enabled = self.parsing_config.get('enabled', True)
@@ -41,309 +39,319 @@ class ChannelParser:
             logger.warning(f"Некорректный формат каналов в конфигурации: {channels_raw}")
         
         self.min_interest_score = self.parsing_config.get('min_interest_score', 60)
-        self.parse_interval = self.parsing_config.get('parse_interval', 3600)  # 1 час
-        self.max_messages_per_parse = self.parsing_config.get('max_messages_per_parse', 50)
         
-        # Используем токен бота для парсинга
-        self.bot_token = config.get('bot', {}).get('token', '')
+        # Дедупликация сообщений (чтобы не обрабатывать одно сообщение дважды)
+        self.processed_messages = set()
         
         logger.info(f"Парсер инициализирован: {len(self.channels)} каналов")
 
-    async def init_bot(self):
-        """Инициализация Bot API клиента"""
+    async def process_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка сообщения из отслеживаемого канала/группы"""
         try:
-            if not self.bot_token:
-                logger.error("Bot token не установлен")
-                return False
-            
-            self.bot = Bot(token=self.bot_token)
-            
-            # Проверяем что бот работает
-            bot_info = await self.bot.get_me()
-            logger.info(f"Bot API инициализирован: @{bot_info.username}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Ошибка инициализации Bot API: {e}")
-            return False
-
-    async def start_parsing(self):
-        """Запуск парсинга каналов"""
-        if not self.enabled:
-            logger.info("Парсинг каналов отключен в конфигурации")
-            return
-        
-        if not self.channels:
-            logger.warning("Не настроены каналы для парсинга")
-            return
-        
-        self.is_running = True
-        logger.info("Запуск парсинга каналов...")
-        
-        # Инициализируем каналы в БД
-        await self._init_channels_in_db()
-        
-        # Инициализируем бота
-        bot_ready = await self.init_bot()
-        if not bot_ready:
-            logger.error("Не удалось инициализировать Bot API, парсинг остановлен")
-            return
-        
-        # Запускаем основной цикл парсинга
-        while self.is_running:
-            try:
-                await self._parse_all_channels()
-                
-                # Ждем до следующего парсинга
-                logger.info(f"Следующий парсинг через {self.parse_interval} секунд")
-                await asyncio.sleep(self.parse_interval)
-                
-            except Exception as e:
-                logger.error(f"Ошибка в цикле парсинга: {e}")
-                await asyncio.sleep(60)  # Короткая пауза при ошибке
-
-    async def stop_parsing(self):
-        """Остановка парсинга"""
-        self.is_running = False
-        logger.info("Парсинг остановлен")
-
-    async def _init_channels_in_db(self):
-        """Инициализация каналов в базе данных"""
-        for channel_username in self.channels:
-            channel = ParsedChannel(
-                channel_username=str(channel_username),
-                channel_title=f"Канал {channel_username}",
-                enabled=True
-            )
-            await create_or_update_channel(channel)
-        
-        logger.info(f"Инициализировано {len(self.channels)} каналов в БД")
-
-    async def _parse_all_channels(self):
-        """Парсинг всех активных каналов"""
-        active_channels = await get_active_channels()
-        
-        for channel in active_channels:
-            try:
-                await self._parse_channel(channel)
-            except Exception as e:
-                logger.error(f"Ошибка парсинга канала {channel.channel_username}: {e}")
-
-    async def _parse_channel(self, channel: ParsedChannel):
-        """Парсинг одного канала через Bot API"""
-        logger.info(f"Парсинг канала: {channel.channel_username}")
-        
-        try:
-            # Получаем информацию о канале
-            try:
-                chat = await self.bot.get_chat(channel.channel_username)
-                logger.info(f"Канал найден: {chat.title}")
-                
-                # Обновляем название канала в БД
-                if chat.title and chat.title != channel.channel_title:
-                    channel.channel_title = chat.title
-                    await create_or_update_channel(channel)
-                
-            except TelegramError as e:
-                if "chat not found" in str(e).lower():
-                    logger.warning(f"Канал {channel.channel_username} не найден или бот не добавлен")
-                else:
-                    logger.error(f"Ошибка доступа к каналу {channel.channel_username}: {e}")
+            if not self.enabled:
                 return
             
-            # Получаем последние сообщения из канала
-            messages = await self._get_channel_messages_via_bot(channel)
+            chat_id = update.effective_chat.id
+            message_id = update.message.message_id
+            user = update.effective_user
+            message_text = update.message.text
             
-            leads_found = 0
+            # Проверяем дедупликацию
+            message_key = f"{chat_id}:{message_id}"
+            if message_key in self.processed_messages:
+                return
             
-            for message_data in messages:
-                # Анализируем сообщение через Claude
-                claude_client = get_claude_client()
-                if claude_client:
-                    interest_score = await claude_client.analyze_potential_lead(
-                        message_data['text'],
-                        channel.channel_username
+            self.processed_messages.add(message_key)
+            
+            # Ограничиваем размер кэша
+            if len(self.processed_messages) > 10000:
+                # Удаляем половину старых записей
+                old_messages = list(self.processed_messages)[:5000]
+                for msg in old_messages:
+                    self.processed_messages.discard(msg)
+            
+            logger.info(f"Обрабатываем сообщение из канала {chat_id}: {message_text[:50]}...")
+            
+            # Получаем информацию о канале
+            chat = update.effective_chat
+            channel_identifier = str(chat_id)
+            
+            # Пытаемся найти username канала
+            if chat.username:
+                channel_identifier = f"@{chat.username}"
+            
+            # Анализируем сообщение
+            interest_score = await self._analyze_message(message_text, channel_identifier)
+            
+            logger.info(f"Скор заинтересованности: {interest_score}")
+            
+            # Если скор высокий - сохраняем как лид
+            if interest_score >= self.min_interest_score:
+                # Проверяем, что такой лид еще не существует
+                if not await self._lead_exists(user.id, message_text):
+                    lead = Lead(
+                        telegram_id=user.id,
+                        username=user.username,
+                        first_name=user.first_name,
+                        source_channel=channel_identifier,
+                        interest_score=interest_score,
+                        message_text=message_text,
+                        message_date=update.message.date
                     )
                     
-                    # Если скор высокий - сохраняем как лид
-                    if interest_score >= self.min_interest_score:
-                        # Проверяем, что такой лид еще не существует
-                        if not await self._lead_exists(message_data.get('user_id'), message_data['text']):
-                            lead = Lead(
-                                telegram_id=message_data.get('user_id'),
-                                username=message_data.get('username'),
-                                first_name=message_data.get('first_name'),
-                                source_channel=channel.channel_username,
-                                interest_score=interest_score,
-                                message_text=message_data['text'],
-                                message_date=message_data.get('date')
-                            )
-                            
-                            await create_lead(lead)
-                            leads_found += 1
-                            
-                            logger.info(f"Найден лид: {lead.first_name} (score: {interest_score})")
+                    await create_lead(lead)
+                    
+                    logger.info(f"🎯 НАЙДЕН ЛИД: {user.first_name} (@{user.username}) - score: {interest_score}")
+                    logger.info(f"Текст: {message_text[:100]}...")
+                    
+                    # Уведомляем админов о новом лиде
+                    await self._notify_admins_about_lead(context, lead)
+                else:
+                    logger.debug(f"Лид уже существует для пользователя {user.id}")
             
             # Обновляем статистику канала
-            if messages:
-                last_message_id = max(msg.get('message_id', 0) for msg in messages)
-                await update_channel_stats(
-                    channel.channel_username,
-                    last_message_id,
-                    leads_found
-                )
-            
-            logger.info(f"Канал {channel.channel_username}: обработано {len(messages)} сообщений, найдено {leads_found} лидов")
+            await self._update_channel_stats(channel_identifier, message_id, interest_score >= self.min_interest_score)
             
         except Exception as e:
-            logger.error(f"Ошибка парсинга канала {channel.channel_username}: {e}")
+            logger.error(f"Ошибка обработки сообщения из канала: {e}")
+            import traceback
+            traceback.print_exc()
 
-    async def _get_channel_messages_via_bot(self, channel: ParsedChannel) -> List[dict]:
-        """Получение сообщений через Bot API"""
-        messages = []
-        
+    async def _analyze_message(self, message_text: str, channel_identifier: str) -> int:
+        """Анализ сообщения на предмет потенциального лида"""
         try:
-            # Получаем последние обновления из канала
-            # Примечание: Bot API имеет ограничения на получение истории сообщений
-            # Мы можем получить только сообщения, которые бот "видел"
-            
-            # Альтернативный подход: мониторинг новых сообщений
-            # Для демонстрации создаем тестовые сообщения
-            
-            current_time = datetime.now()
-            
-            # Симулируем новые сообщения (в реальности они приходили бы через updates)
-            demo_messages = [
-                {
-                    'message_id': int(current_time.timestamp()),
-                    'text': 'Ищу систему CRM для своего интернет-магазина. Кто может посоветовать?',
-                    'date': current_time - timedelta(minutes=15),
-                    'user_id': 111111,
-                    'username': 'business_user1',
-                    'first_name': 'Алексей'
-                },
-                {
-                    'message_id': int(current_time.timestamp()) + 1,
-                    'text': 'Нужна автоматизация продаж через телеграм. Бюджет есть.',
-                    'date': current_time - timedelta(minutes=30),
-                    'user_id': 222222,
-                    'username': 'entrepreneur',
-                    'first_name': 'Мария'
-                },
-                {
-                    'message_id': int(current_time.timestamp()) + 2,
-                    'text': 'Кто-то пользуется ботами для обработки заявок? Эффективно?',
-                    'date': current_time - timedelta(hours=1),
-                    'user_id': 333333,
-                    'username': 'manager_anna',
-                    'first_name': 'Анна'
-                },
-                {
-                    'message_id': int(current_time.timestamp()) + 3,
-                    'text': 'Привет всем! Как дела?',
-                    'date': current_time - timedelta(hours=2),
-                    'user_id': 444444,
-                    'username': 'regular_user',
-                    'first_name': 'Сергей'
-                },
-                {
-                    'message_id': int(current_time.timestamp()) + 4,
-                    'text': 'Помогите выбрать платформу для онлайн-продаж. Рассматриваю разные варианты.',
-                    'date': current_time - timedelta(hours=3),
-                    'user_id': 555555,
-                    'username': 'shop_owner',
-                    'first_name': 'Елена'
-                }
-            ]
-            
-            # Фильтруем сообщения, которые мы еще не обрабатывали
-            for msg in demo_messages:
-                if not channel.last_message_id or msg['message_id'] > channel.last_message_id:
-                    messages.append(msg)
-            
-            logger.info(f"Получено {len(messages)} новых сообщений из {channel.channel_username}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения сообщений из {channel.channel_username}: {e}")
+            claude_client = get_claude_client()
+            if claude_client:
+                # Используем Claude для анализа
+                score = await claude_client.analyze_potential_lead(message_text, channel_identifier)
+                return score
+            else:
+                # Простой анализ без AI
+                return self._simple_lead_analysis(message_text)
         
-        return messages
+        except Exception as e:
+            logger.error(f"Ошибка анализа сообщения: {e}")
+            return self._simple_lead_analysis(message_text)
 
-    async def _lead_exists(self, user_id: Optional[int], message_text: str) -> bool:
+    def _simple_lead_analysis(self, message_text: str) -> int:
+        """Простой анализ потенциального лида без AI"""
+        if not message_text:
+            return 0
+        
+        message_lower = message_text.lower()
+        score = 0
+        
+        # Высокоприоритетные слова (бизнес-проблемы)
+        high_priority_words = [
+            'crm', 'автоматизация', 'продажи', 'клиенты', 'заявки', 
+            'обработка заявок', 'бот для продаж', 'telegram bot',
+            'интернет-магазин', 'онлайн-продажи', 'воронка продаж',
+            'лидогенерация', 'конверсия', 'аналитика продаж'
+        ]
+        
+        # Проблемы, которые мы решаем
+        problem_words = [
+            'не успеваем обрабатывать', 'много заявок', 'теряем клиентов',
+            'нужна система', 'ищу решение', 'как автоматизировать',
+            'эффективность продаж', 'увеличить конверсию',
+            'автоматический ответ', 'обработка сообщений'
+        ]
+        
+        # Намерения покупки
+        buying_intent_words = [
+            'ищу', 'нужно', 'требуется', 'хочу заказать', 'планирую купить',
+            'рассматриваю покупку', 'интересует стоимость', 'бюджет есть',
+            'готов платить', 'нужна консультация'
+        ]
+        
+        # Технические запросы
+        tech_words = [
+            'api интеграция', 'webhook', 'chatbot', 'бот разработка',
+            'автоответчик', 'воронка', 'аналитика', 'метрики',
+            'integration', 'automation'
+        ]
+        
+        # Подсчет баллов
+        for word in high_priority_words:
+            if word in message_lower:
+                score += 40
+                break  # Один раз за категорию
+        
+        for word in problem_words:
+            if word in message_lower:
+                score += 35
+                break
+        
+        for word in buying_intent_words:
+            if word in message_lower:
+                score += 30
+                break
+        
+        for word in tech_words:
+            if word in message_lower:
+                score += 25
+                break
+        
+        # Дополнительные баллы за вопросы
+        if any(word in message_lower for word in ['как', 'что', 'где', 'кто может', '?']):
+            score += 10
+        
+        # Снижаем балл за нерелевантные сообщения
+        irrelevant_words = ['спам', 'реклама', 'продаю', 'куплю авто', 'недвижимость']
+        for word in irrelevant_words:
+            if word in message_lower:
+                score -= 20
+        
+        # Проверяем длину сообщения (слишком короткие обычно не интересны)
+        if len(message_text) < 20:
+            score -= 10
+        
+        return max(0, min(100, score))
+
+    async def _lead_exists(self, user_id: int, message_text: str) -> bool:
         """Проверка существования лида"""
-        # Простая проверка по тексту сообщения
-        # В реальной системе нужна более сложная логика
         try:
             from database.operations import get_connection
             async with await get_connection() as db:
-                cursor = await db.execute(
-                    "SELECT id FROM leads WHERE message_text = ? LIMIT 1",
-                    (message_text,)
-                )
+                # Проверяем по пользователю и похожему тексту (последние 7 дней)
+                cursor = await db.execute("""
+                    SELECT id FROM leads 
+                    WHERE telegram_id = ? 
+                    AND created_at >= datetime('now', '-7 days')
+                    LIMIT 1
+                """, (user_id,))
                 result = await cursor.fetchone()
                 return result is not None
         except Exception as e:
             logger.error(f"Ошибка проверки существования лида: {e}")
             return False
 
-    def get_parsing_status(self) -> dict:
+    async def _update_channel_stats(self, channel_identifier: str, message_id: int, lead_found: bool):
+        """Обновление статистики канала"""
+        try:
+            leads_count = 1 if lead_found else 0
+            await update_channel_stats(channel_identifier, message_id, leads_count)
+        except Exception as e:
+            logger.error(f"Ошибка обновления статистики канала: {e}")
+
+    async def _notify_admins_about_lead(self, context: ContextTypes.DEFAULT_TYPE, lead: Lead):
+        """Уведомление админов о новом лиде"""
+        try:
+            admin_ids = self.config.get('bot', {}).get('admin_ids', [])
+            
+            if not admin_ids:
+                return
+            
+            # Формируем сообщение
+            username_text = f"@{lead.username}" if lead.username else "без username"
+            message = f"""🎯 <b>НОВЫЙ ЛИД!</b>
+
+👤 <b>Пользователь:</b> {lead.first_name} ({username_text})
+⭐ <b>Скор:</b> {lead.interest_score}/100
+📺 <b>Источник:</b> {lead.source_channel}
+💬 <b>Сообщение:</b> 
+<i>{lead.message_text[:300]}...</i>
+
+🔗 <b>Профиль:</b> tg://user?id={lead.telegram_id}"""
+
+            # Отправляем всем админам
+            for admin_id in admin_ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=message,
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомлений админам: {e}")
+
+    async def initialize_channels(self):
+        """Инициализация каналов в базе данных"""
+        try:
+            for channel_identifier in self.channels:
+                channel = ParsedChannel(
+                    channel_username=channel_identifier,
+                    channel_title=f"Канал {channel_identifier}",
+                    enabled=True
+                )
+                await create_or_update_channel(channel)
+            
+            logger.info(f"Инициализировано {len(self.channels)} каналов в БД")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации каналов: {e}")
+
+    def get_parsing_status(self) -> Dict[str, Any]:
         """Получение статуса парсинга"""
         return {
-            'is_running': self.is_running,
             'enabled': self.enabled,
             'channels_count': len(self.channels),
-            'interval': self.parse_interval,
+            'channels': self.channels,
             'min_score': self.min_interest_score,
-            'bot_configured': bool(self.bot_token)
+            'processed_messages_count': len(self.processed_messages)
         }
 
-    async def add_channel(self, channel_username: str) -> bool:
-        """Добавление нового канала для парсинга"""
+    def is_channel_monitored(self, chat_id: int, chat_username: str = None) -> bool:
+        """Проверка, отслеживается ли канал/группа"""
+        if not self.enabled:
+            return False
+        
+        # Проверяем по ID
+        if str(chat_id) in self.channels:
+            return True
+        
+        # Проверяем по username
+        if chat_username:
+            username_variants = [f"@{chat_username}", chat_username]
+            for variant in username_variants:
+                if variant in self.channels:
+                    return True
+        
+        return False
+
+    async def add_channel(self, channel_identifier: str) -> bool:
+        """Добавление нового канала для мониторинга"""
         try:
-            # Проверяем доступность канала
-            if self.bot:
-                chat = await self.bot.get_chat(channel_username)
+            if channel_identifier not in self.channels:
+                self.channels.append(channel_identifier)
                 
-                # Создаем запись в БД
+                # Добавляем в БД
                 channel = ParsedChannel(
-                    channel_username=channel_username,
-                    channel_title=chat.title or f"Канал {channel_username}",
+                    channel_username=channel_identifier,
+                    channel_title=f"Канал {channel_identifier}",
                     enabled=True
                 )
                 await create_or_update_channel(channel)
                 
-                # Добавляем в список для парсинга
-                if channel_username not in self.channels:
-                    self.channels.append(channel_username)
-                
-                logger.info(f"Канал {channel_username} добавлен для парсинга")
+                logger.info(f"Канал {channel_identifier} добавлен для мониторинга")
                 return True
-                
-        except TelegramError as e:
-            logger.error(f"Ошибка добавления канала {channel_username}: {e}")
+            
             return False
         except Exception as e:
-            logger.error(f"Неожиданная ошибка при добавлении канала: {e}")
+            logger.error(f"Ошибка добавления канала {channel_identifier}: {e}")
             return False
 
-    async def remove_channel(self, channel_username: str) -> bool:
-        """Удаление канала из парсинга"""
+    async def remove_channel(self, channel_identifier: str) -> bool:
+        """Удаление канала из мониторинга"""
         try:
-            # Отключаем в БД
-            from database.operations import get_connection
-            async with await get_connection() as db:
-                await db.execute(
-                    "UPDATE parsed_channels SET enabled = FALSE WHERE channel_username = ?",
-                    (channel_username,)
-                )
-                await db.commit()
+            if channel_identifier in self.channels:
+                self.channels.remove(channel_identifier)
+                
+                # Отключаем в БД
+                from database.operations import get_connection
+                async with await get_connection() as db:
+                    await db.execute(
+                        "UPDATE parsed_channels SET enabled = FALSE WHERE channel_username = ?",
+                        (channel_identifier,)
+                    )
+                    await db.commit()
+                
+                logger.info(f"Канал {channel_identifier} удален из мониторинга")
+                return True
             
-            # Удаляем из списка
-            if channel_username in self.channels:
-                self.channels.remove(channel_username)
-            
-            logger.info(f"Канал {channel_username} отключен от парсинга")
-            return True
-            
+            return False
         except Exception as e:
-            logger.error(f"Ошибка отключения канала {channel_username}: {e}")
+            logger.error(f"Ошибка удаления канала {channel_identifier}: {e}")
             return False
