@@ -50,14 +50,13 @@ class UserHandler:
                 last_name=user_data.last_name
             )
             
-            try:
-                await create_user(user)
-                logger.info(f"Пользователь создан/обновлен: {user_data.id} (@{user_data.username})")
-            except Exception as e:
-                logger.error(f"Ошибка создания пользователя: {e}")
+            await create_user(user)
+            logger.info(f"Пользователь создан/обновлен: {user_data.id} (@{user_data.username})")
             
             # Отправляем приветственное сообщение
-            welcome_message = self.messages_config.get('welcome', 'Добро пожаловать!')
+            welcome_message = self.messages_config.get('welcome', 
+                '🤖 Добро пожаловать в AI-CRM бот!\n\nЯ помогу вам с информацией о наших услугах.\nНапишите мне что-нибудь!')
+            
             keyboard = self._get_main_keyboard()
             
             await update.message.reply_text(
@@ -68,23 +67,24 @@ class UserHandler:
             
         except Exception as e:
             logger.error(f"Ошибка в команде /start: {e}")
-            await update.message.reply_text("Произошла ошибка. Попробуйте еще раз.")
+            await update.message.reply_text("Добро пожаловать! Произошла небольшая ошибка, но я готов работать.")
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /help"""
         try:
             logger.info(f"Команда /help от пользователя {update.effective_user.id}")
-            help_message = self.messages_config.get('help', 'Справка по боту')
+            help_message = self.messages_config.get('help', 
+                'ℹ️ Помощь:\n\n/start - начать работу\n/help - справка\n/menu - главное меню')
             await update.message.reply_text(help_message, parse_mode='HTML')
         except Exception as e:
             logger.error(f"Ошибка в команде /help: {e}")
-            await update.message.reply_text("Ошибка при получении справки.")
+            await update.message.reply_text("Вы можете использовать команды:\n/start - начать\n/help - справка\n/menu - меню")
 
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /menu"""
         try:
             logger.info(f"Команда /menu от пользователя {update.effective_user.id}")
-            menu_message = self.messages_config.get('menu', 'Главное меню')
+            menu_message = self.messages_config.get('menu', '📋 Главное меню:\n\nВыберите действие.')
             keyboard = self._get_main_keyboard()
             
             await update.message.reply_text(
@@ -94,7 +94,7 @@ class UserHandler:
             )
         except Exception as e:
             logger.error(f"Ошибка в команде /menu: {e}")
-            await update.message.reply_text("Ошибка при показе меню.")
+            await update.message.reply_text("📋 Главное меню")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений пользователей"""
@@ -120,64 +120,60 @@ class UserHandler:
             # Увеличиваем счетчик сообщений
             await increment_user_message_count(user_data.id)
             
-            # Анализируем сообщение через Claude (если включено)
+            # Анализируем сообщение
             interest_score = 0
             ai_analysis = ""
-            response_text = "Спасибо за ваше сообщение! Мы обязательно ответим."
+            response_text = "Спасибо за ваше сообщение!"
             
-            if self.features.get('auto_response', True):
+            try:
                 claude_client = get_claude_client()
                 if claude_client:
-                    try:
-                        # Получаем контекст предыдущих сообщений
-                        recent_messages = await get_user_messages(user.id, limit=5)
-                        context = [msg.text for msg in recent_messages]
-                        
-                        # Анализируем заинтересованность
-                        interest_score = await claude_client.analyze_user_interest(
-                            message_text, context
-                        )
-                        
-                        # Генерируем ответ
-                        response_text = await claude_client.generate_response(
-                            message_text, context, interest_score
-                        )
-                        
-                        ai_analysis = f"Interest: {interest_score}/100"
-                        
-                        # Обновляем скор пользователя (берем максимальный)
-                        if interest_score > user.interest_score:
-                            await update_user_interest_score(user_data.id, interest_score)
-                            
-                        logger.info(f"AI анализ: score={interest_score}, ответ готов")
-                        
-                    except Exception as e:
-                        logger.error(f"Ошибка AI анализа: {e}")
-                        response_text = "Спасибо за ваше сообщение! Мы обработаем его в ближайшее время."
-                else:
-                    logger.warning("Claude клиент недоступен, используем базовый ответ")
+                    # Получаем контекст предыдущих сообщений
+                    recent_messages = await get_user_messages(user.id, limit=5)
+                    context = [msg.text for msg in recent_messages if msg.text]
+                    
+                    # Анализируем заинтересованность
+                    interest_score = await claude_client.analyze_user_interest(message_text, context)
+                    
+                    # Генерируем ответ
+                    response_text = await claude_client.generate_response(message_text, context, interest_score)
+                    
+                    ai_analysis = f"Interest: {interest_score}/100"
+                    
+                    # Обновляем скор пользователя (берем максимальный)
+                    if interest_score > user.interest_score:
+                        await update_user_interest_score(user_data.id, interest_score)
+                    
+                    logger.info(f"AI анализ: score={interest_score}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка AI анализа: {e}")
+                # Простой анализ без AI
+                interest_score = self._simple_interest_analysis(message_text)
+                response_text = self._simple_response_generation(message_text, interest_score)
             
-            # Сохраняем сообщение в БД (если включено)
-            if self.features.get('save_all_messages', True):
-                try:
-                    message = Message(
-                        user_id=user.id,
-                        telegram_message_id=update.message.message_id,
-                        text=message_text,
-                        ai_analysis=ai_analysis,
-                        interest_score=interest_score,
-                        response_sent=True
-                    )
-                    await create_message(message)
-                except Exception as e:
-                    logger.error(f"Ошибка сохранения сообщения: {e}")
+            # Сохраняем сообщение в БД
+            try:
+                message = Message(
+                    user_id=user.id,
+                    telegram_message_id=update.message.message_id,
+                    text=message_text,
+                    ai_analysis=ai_analysis,
+                    interest_score=interest_score,
+                    response_sent=True
+                )
+                await create_message(message)
+            except Exception as e:
+                logger.error(f"Ошибка сохранения сообщения: {e}")
             
-            # Отправляем ответ
+            # Отправляем ответ с соответствующей клавиатурой
             keyboard = None
             if interest_score >= 70:  # Высокая заинтересованность
                 keyboard = self._get_interested_user_keyboard()
             elif interest_score <= 30:  # Низкая заинтересованность
                 keyboard = self._get_help_keyboard()
+            else:  # Средняя заинтересованность
+                keyboard = self._get_main_keyboard()
             
             await update.message.reply_text(
                 response_text,
@@ -192,11 +188,44 @@ class UserHandler:
             import traceback
             traceback.print_exc()
             
-            error_message = self.messages_config.get('error', 'Произошла ошибка')
             try:
-                await update.message.reply_text(error_message)
+                await update.message.reply_text("Спасибо за сообщение! Мы обработаем его в ближайшее время.")
             except:
                 logger.error("Не удалось отправить сообщение об ошибке")
+
+    def _simple_interest_analysis(self, message: str) -> int:
+        """Простой анализ заинтересованности без AI"""
+        message_lower = message.lower()
+        
+        # Высокий интерес
+        high_words = ['купить', 'заказать', 'цена', 'стоимость', 'сколько стоит']
+        # Средний интерес
+        medium_words = ['интересно', 'подробнее', 'расскажите', 'как работает']
+        # Низкий интерес
+        low_words = ['дорого', 'не нужно', 'не интересно']
+        
+        for word in high_words:
+            if word in message_lower:
+                return 85
+        
+        for word in medium_words:
+            if word in message_lower:
+                return 60
+        
+        for word in low_words:
+            if word in message_lower:
+                return 20
+        
+        return 50
+
+    def _simple_response_generation(self, message: str, interest_score: int) -> str:
+        """Простая генерация ответа без AI"""
+        if interest_score >= 70:
+            return "Отлично! Вижу, что вас заинтересовали наши услуги. Наш менеджер свяжется с вами для обсуждения деталей! 📞"
+        elif interest_score >= 40:
+            return "Спасибо за интерес! Если у вас есть вопросы о наших услугах, я буду рад помочь. 😊"
+        else:
+            return "Спасибо за сообщение! Если понадобится помощь, обращайтесь. 👍"
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка callback запросов от инлайн кнопок"""
@@ -262,7 +291,7 @@ class UserHandler:
 
     async def _show_main_menu(self, query):
         """Показать главное меню"""
-        menu_message = self.messages_config.get('menu', 'Главное меню')
+        menu_message = self.messages_config.get('menu', '📋 Главное меню:\n\nВыберите действие.')
         keyboard = self._get_main_keyboard()
         
         await query.edit_message_text(
@@ -273,7 +302,7 @@ class UserHandler:
 
     async def _show_help(self, query):
         """Показать справку"""
-        help_message = self.messages_config.get('help', 'Справка по боту')
+        help_message = self.messages_config.get('help', 'ℹ️ Помощь:\n\n/start - начать работу\n/help - справка\n/menu - главное меню')
         keyboard = [
             [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
         ]
@@ -286,7 +315,8 @@ class UserHandler:
 
     async def _show_contact(self, query):
         """Показать контактную информацию"""
-        contact_message = self.messages_config.get('contact', 'Контактная информация')
+        contact_message = self.messages_config.get('contact', 
+            '📞 Контакты:\n\n• Telegram: @support\n• Email: support@example.com')
         keyboard = [
             [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
         ]
@@ -299,18 +329,16 @@ class UserHandler:
 
     async def _show_about(self, query):
         """Показать информацию о компании"""
-        about_message = """
-📋 <b>О нашей компании</b>
+        about_message = """📋 <b>О нашей компании</b>
 
-Мы предоставляем качественные услуги и решения для бизнеса.
+Мы предоставляем качественные услуги и решения для бизнеса:
 
 🔹 Профессиональный подход
 🔹 Индивидуальные решения  
 🔹 Поддержка 24/7
 🔹 Гарантия качества
 
-Свяжитесь с нами для получения консультации!
-        """
+Свяжитесь с нами для получения консультации!"""
         
         keyboard = [
             [

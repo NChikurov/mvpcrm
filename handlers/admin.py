@@ -132,7 +132,7 @@ class AdminHandler:
                     message += f"• {lead.first_name or 'Аноним'} ({username}) - {lead.interest_score}/100, {created}\n"
             
             if not recent_leads and not all_leads:
-                message += "Лидов пока нет. Настройте парсинг каналов."
+                message += "Лидов пока нет. Проверьте настройки парсинга каналов."
             
             keyboard = [
                 [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
@@ -166,18 +166,25 @@ class AdminHandler:
                         last_parsed = channel.last_parsed.strftime("%d.%m %H:%M")
                     
                     message += f"{status} <code>{channel.channel_username}</code>\n"
-                    message += f"   Спарсено: {channel.total_messages_parsed} сообщений\n"
-                    message += f"   Лидов найдено: {channel.leads_found}\n"
-                    message += f"   Последний парсинг: {last_parsed}\n\n"
+                    message += f"   📋 {channel.channel_title or 'Без названия'}\n"
+                    message += f"   📄 Спарсено: {channel.total_messages_parsed} сообщений\n"
+                    message += f"   🎯 Лидов найдено: {channel.leads_found}\n"
+                    message += f"   ⏰ Последний парсинг: {last_parsed}\n\n"
             else:
                 message += "Каналы не настроены.\n"
             
-            message += "<b>Настройка:</b>\n"
-            message += "Добавьте каналы в config.yaml в секции parsing.channels\n"
-            message += "Пример: ['@channel1', '@channel2']\n\n"
-            message += "После изменения конфигурации перезапустите бота."
+            message += "<b>💡 Как добавить каналы:</b>\n"
+            message += "1. Добавьте бота в канал как администратора\n"
+            message += "2. Укажите каналы в переменной PARSING_CHANNELS в .env файле\n"
+            message += "3. Формат: <code>@channel1,@channel2,-1001234567890</code>\n"
+            message += "4. Перезапустите бота\n\n"
+            message += "📋 <b>Текущие настройки:</b>\n"
+            message += f"• Парсинг: {'✅ Включен' if self.config.get('parsing', {}).get('enabled') else '❌ Отключен'}\n"
+            message += f"• Интервал: {self.config.get('parsing', {}).get('parse_interval', 3600)} сек\n"
+            message += f"• Мин. скор: {self.config.get('parsing', {}).get('min_interest_score', 60)}"
             
             keyboard = [
+                [InlineKeyboardButton("🔄 Обновить", callback_data="admin_channels")],
                 [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
             ]
             
@@ -259,11 +266,12 @@ class AdminHandler:
             )
             
             # Отправляем отчет
+            success_rate = (sent_count/(sent_count+failed_count)*100) if (sent_count+failed_count) > 0 else 0
             await update.message.reply_text(
                 f"✅ <b>Рассылка завершена</b>\n\n"
                 f"📤 Отправлено: {sent_count}\n"
                 f"❌ Ошибок: {failed_count}\n"
-                f"📊 Успешность: {sent_count/(sent_count+failed_count)*100:.1f}%",
+                f"📊 Успешность: {success_rate:.1f}%",
                 parse_mode='HTML'
             )
             
@@ -324,16 +332,30 @@ class AdminHandler:
             return
         
         message = "⚙️ <b>Настройки бота</b>\n\n"
-        message += "Основные настройки находятся в файле <code>config.yaml</code>\n\n"
-        message += "<b>Для изменения настроек:</b>\n"
-        message += "1. Отредактируйте config.yaml\n"
-        message += "2. Перезапустите бота\n\n"
-        message += "<b>Основные секции:</b>\n"
-        message += "• <code>bot</code> - настройки бота\n"
-        message += "• <code>claude</code> - настройки AI\n"
-        message += "• <code>parsing</code> - настройки парсинга\n"
-        message += "• <code>messages</code> - тексты сообщений\n"
-        message += "• <code>prompts</code> - промпты для Claude\n"
+        
+        # Проверяем Claude API
+        from ai.claude_client import get_claude_client
+        claude_client = get_claude_client()
+        if claude_client:
+            stats = claude_client.get_usage_stats()
+            message += f"🤖 <b>Claude API:</b> {'✅ Активен' if stats['api_available'] else '⚠️ Простой режим'}\n"
+            message += f"📦 Модель: {stats['model']}\n"
+        else:
+            message += "🤖 <b>Claude API:</b> ❌ Не инициализирован\n"
+        
+        message += f"\n👑 <b>Администраторы:</b> {len(self.admin_ids)}\n"
+        message += f"💬 <b>Автоответы:</b> {'✅' if self.config.get('features', {}).get('auto_response') else '❌'}\n"
+        message += f"💾 <b>Сохранение сообщений:</b> {'✅' if self.config.get('features', {}).get('save_all_messages') else '❌'}\n"
+        
+        message += f"\n📺 <b>Парсинг каналов:</b>\n"
+        message += f"• Статус: {'✅ Включен' if self.config.get('parsing', {}).get('enabled') else '❌ Отключен'}\n"
+        message += f"• Каналов настроено: {len(self.config.get('parsing', {}).get('channels', []))}\n"
+        message += f"• Интервал: {self.config.get('parsing', {}).get('parse_interval', 3600)} сек\n"
+        message += f"• Мин. скор для лида: {self.config.get('parsing', {}).get('min_interest_score', 60)}\n"
+        
+        message += "\n<b>💡 Настройка:</b>\n"
+        message += "Основные параметры в файлах <code>.env</code> и <code>config.yaml</code>\n"
+        message += "После изменений перезапустите бота."
         
         keyboard = [
             [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
@@ -470,7 +492,40 @@ class AdminHandler:
 
     async def _show_channels_callback(self, query):
         """Показать каналы через callback"""
-        await self._show_admin_panel(query)  # Пока просто возвращаемся в админку
+        try:
+            channels = await get_active_channels()
+            
+            message = "📺 <b>Каналы для парсинга</b>\n\n"
+            
+            if channels:
+                for channel in channels[:5]:  # Показываем только первые 5
+                    status = "✅" if channel.enabled else "❌"
+                    message += f"{status} <code>{channel.channel_username}</code>\n"
+                    message += f"   📄 {channel.total_messages_parsed} сообщений, 🎯 {channel.leads_found} лидов\n"
+                
+                if len(channels) > 5:
+                    message += f"\n... и еще {len(channels) - 5} каналов"
+            else:
+                message += "Каналы не настроены."
+            
+            message += f"\n\n📊 <b>Статус парсинга:</b>\n"
+            message += f"• {'✅ Активен' if self.config.get('parsing', {}).get('enabled') else '❌ Отключен'}\n"
+            message += f"• Интервал: {self.config.get('parsing', {}).get('parse_interval', 3600)} сек"
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Обновить", callback_data="admin_channels")],
+                [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
+            ]
+            
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка показа каналов: {e}")
+            await query.edit_message_text("❌ Ошибка получения данных")
 
     async def _show_stats_callback(self, query):
         """Показать статистику через callback"""
@@ -522,13 +577,21 @@ class AdminHandler:
     async def _show_settings_callback(self, query):
         """Показать настройки через callback"""
         message = "⚙️ <b>Настройки</b>\n\n"
-        message += "Настройки в файле <code>config.yaml</code>\n\n"
-        message += "Основные параметры:\n"
-        message += "• Тексты сообщений\n"
-        message += "• Промпты для AI\n"
-        message += "• Каналы для парсинга\n"
-        message += "• Права администратора\n\n"
-        message += "После изменений перезапустите бота."
+        
+        # Проверяем Claude API
+        from ai.claude_client import get_claude_client
+        claude_client = get_claude_client()
+        if claude_client:
+            stats = claude_client.get_usage_stats()
+            message += f"🤖 Claude: {'✅' if stats['api_available'] else '⚠️ Простой режим'}\n"
+        else:
+            message += "🤖 Claude: ❌ Не инициализирован\n"
+        
+        message += f"👑 Админов: {len(self.admin_ids)}\n"
+        message += f"📺 Парсинг: {'✅' if self.config.get('parsing', {}).get('enabled') else '❌'}\n"
+        message += f"💬 Автоответы: {'✅' if self.config.get('features', {}).get('auto_response') else '❌'}\n"
+        
+        message += "\nНастройки в <code>.env</code> и <code>config.yaml</code>"
         
         keyboard = [
             [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]

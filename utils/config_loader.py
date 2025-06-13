@@ -62,11 +62,6 @@ def build_config_from_env(base_config: Dict[str, Any]) -> Dict[str, Any]:
             'temperature': float(os.getenv('CLAUDE_TEMPERATURE', base_config.get('claude', {}).get('temperature', 0.7)))
         },
         
-        'telegram_api': {
-            'api_id': int(os.getenv('TELEGRAM_API_ID', base_config.get('telegram_api', {}).get('api_id', 0))),
-            'api_hash': os.getenv('TELEGRAM_API_HASH', base_config.get('telegram_api', {}).get('api_hash', ''))
-        },
-        
         'database': {
             'path': os.getenv('DATABASE_PATH', base_config.get('database', {}).get('path', 'data/bot.db'))
         },
@@ -140,8 +135,8 @@ def validate_config(config: Dict[str, Any]) -> None:
     if not config['bot']['admin_ids']:
         errors.append("ADMIN_IDS не установлены")
     
-    if not config['claude']['api_key']:
-        logger.warning("CLAUDE_API_KEY не установлен, будет использован демо режим")
+    if not config['claude']['api_key'] or config['claude']['api_key'] == 'your_claude_api_key_here':
+        logger.warning("CLAUDE_API_KEY не установлен, будет использован простой режим анализа")
     
     if config['parsing']['enabled'] and not config['parsing']['channels']:
         logger.warning("Парсинг включен, но каналы не настроены")
@@ -217,8 +212,95 @@ def print_config_summary(config: Dict[str, Any]) -> None:
     logger.info("=== Сводка конфигурации ===")
     logger.info(f"Бот: {config['bot']['name']}")
     logger.info(f"Админов: {len(config['bot']['admin_ids'])}")
-    logger.info(f"Claude API: {'✓' if config['claude']['api_key'] else '✗'}")
+    logger.info(f"Claude API: {'✓' if config['claude']['api_key'] and config['claude']['api_key'] != 'your_claude_api_key_here' else '✗'}")
     logger.info(f"Парсинг: {'✓' if config['parsing']['enabled'] else '✗'}")
     logger.info(f"Каналов для парсинга: {len(config['parsing']['channels'])}")
     logger.info(f"Автоответы: {'✓' if config['features']['auto_response'] else '✗'}")
     logger.info("===========================")
+
+def get_parsing_channels_info(config: Dict[str, Any]) -> str:
+    """Возвращает информацию о настроенных каналах для парсинга"""
+    channels = config.get('parsing', {}).get('channels', [])
+    if not channels:
+        return "Каналы для парсинга не настроены"
+    
+    info = f"Настроено каналов: {len(channels)}\n"
+    for i, channel in enumerate(channels[:5], 1):  # Показываем максимум 5
+        info += f"{i}. {channel}\n"
+    
+    if len(channels) > 5:
+        info += f"... и еще {len(channels) - 5}"
+    
+    return info
+
+def validate_channel_format(channel: str) -> bool:
+    """Проверяет корректность формата канала"""
+    if not channel:
+        return False
+    
+    # Поддерживаем @username и -100123456789 форматы
+    if channel.startswith('@'):
+        # Проверяем username формат
+        username = channel[1:]
+        if len(username) >= 5 and username.replace('_', '').isalnum():
+            return True
+    elif channel.startswith('-100'):
+        # Проверяем ID формат
+        try:
+            int(channel)
+            return True
+        except ValueError:
+            pass
+    
+    return False
+
+def get_config_validation_report(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Генерирует отчет о валидности конфигурации"""
+    report = {
+        'valid': True,
+        'errors': [],
+        'warnings': [],
+        'info': {}
+    }
+    
+    # Проверка бота
+    if not config['bot']['token']:
+        report['errors'].append("BOT_TOKEN не установлен")
+        report['valid'] = False
+    
+    if not config['bot']['admin_ids']:
+        report['errors'].append("ADMIN_IDS не установлены")
+        report['valid'] = False
+    
+    # Проверка Claude
+    if not config['claude']['api_key'] or config['claude']['api_key'] == 'your_claude_api_key_here':
+        report['warnings'].append("Claude API не настроен - будет использоваться простой режим")
+    
+    # Проверка парсинга
+    if config['parsing']['enabled']:
+        if not config['parsing']['channels']:
+            report['warnings'].append("Парсинг включен, но каналы не настроены")
+        else:
+            invalid_channels = []
+            for channel in config['parsing']['channels']:
+                if not validate_channel_format(str(channel)):
+                    invalid_channels.append(channel)
+            
+            if invalid_channels:
+                report['warnings'].append(f"Некорректный формат каналов: {invalid_channels}")
+    
+    # Информация
+    report['info'] = {
+        'bot_name': config['bot']['name'],
+        'admin_count': len(config['bot']['admin_ids']),
+        'claude_enabled': bool(config['claude']['api_key'] and config['claude']['api_key'] != 'your_claude_api_key_here'),
+        'parsing_enabled': config['parsing']['enabled'],
+        'channels_count': len(config['parsing']['channels']),
+        'features': {
+            'auto_response': config['features']['auto_response'],
+            'save_messages': config['features']['save_all_messages'],
+            'analytics': config['features']['analytics']
+        }
+    }
+    
+    return report
