@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.sqlite3
+data/
+logs/
+.env
+config_local.yaml
+.DS_Store
