@@ -5,8 +5,6 @@ AI-CRM Telegram Bot MVP
 import asyncio
 import logging
 import sys
-import threading
-import signal
 from pathlib import Path
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
@@ -34,7 +32,6 @@ class AIBot:
             self.user_handler = None
             self.admin_handler = None
             self.channel_parser = None
-            self.parser_task = None
             self.running = False
             
             # Выводим сводку конфигурации
@@ -98,9 +95,11 @@ class AIBot:
                 self.handle_any_message
             ))
             
-            # Callback обработчики
-            self.app.add_handler(self.user_handler.callback_handler)
+            # Callback обработчики - ВАЖЕН ПОРЯДОК!
+            # Сначала админские (более специфичные)
             self.app.add_handler(self.admin_handler.callback_handler)
+            # Потом пользовательские (общие)
+            self.app.add_handler(self.user_handler.callback_handler)
             
             logger.info("Все обработчики успешно зарегистрированы")
             
@@ -111,38 +110,55 @@ class AIBot:
     async def handle_any_message(self, update, context):
         """Обработка всех сообщений (личные + группы)"""
         try:
+            # Проверяем что это текстовое сообщение
+            if not update.message or not update.message.text:
+                return
+            
             chat_type = update.effective_chat.type
             chat_id = update.effective_chat.id
             user_id = update.effective_user.id
-            message_text = update.message.text
+            message_text = update.message.text.strip()
             
-            logger.info(f"Сообщение из {chat_type} чата {chat_id} от пользователя {user_id}: {message_text[:50]}...")
+            # Пропускаем пустые сообщения
+            if not message_text:
+                return
+            
+            logger.info(f"🔄 ПОЛУЧЕНО СООБЩЕНИЕ: {chat_type} чат {chat_id}, от {user_id}: '{message_text[:50]}...'")
             
             # Если это личное сообщение - обрабатываем как обычно
             if chat_type == 'private':
+                logger.info(f"📱 Обрабатываем личное сообщение от {user_id}")
                 await self.user_handler.handle_message(update, context)
             
             # Если это группа/канал - обрабатываем через парсер
             elif chat_type in ['group', 'supergroup', 'channel']:
                 # Проверяем, отслеживается ли этот канал/группа
                 channels = self.config.get('parsing', {}).get('channels', [])
-                chat_username = update.effective_chat.username
+                chat_username = getattr(update.effective_chat, 'username', None)
+                
+                logger.info(f"📺 Сообщение из {chat_type}: {chat_id} (@{chat_username})")
+                logger.info(f"📋 Отслеживаемые каналы: {channels}")
                 
                 # Проверяем по ID или username
                 is_monitored = False
                 if str(chat_id) in [str(ch) for ch in channels]:
                     is_monitored = True
+                    logger.info(f"✅ Канал найден по ID: {chat_id}")
                 elif chat_username and f"@{chat_username}" in channels:
                     is_monitored = True
+                    logger.info(f"✅ Канал найден по username: @{chat_username}")
                 
-                if is_monitored and self.config.get('parsing', {}).get('enabled'):
-                    logger.info(f"Обрабатываем сообщение из отслеживаемой группы {chat_id}")
+                parsing_enabled = self.config.get('parsing', {}).get('enabled', False)
+                logger.info(f"🔧 Парсинг включен: {parsing_enabled}")
+                
+                if is_monitored and parsing_enabled:
+                    logger.info(f"🎯 Обрабатываем сообщение из отслеживаемой группы {chat_id}")
                     await self.channel_parser.process_message(update, context)
                 else:
-                    logger.debug(f"Группа {chat_id} не отслеживается")
+                    logger.info(f"⏭️ Группа {chat_id} не отслеживается или парсинг отключен")
             
         except Exception as e:
-            logger.error(f"Ошибка обработки сообщения: {e}")
+            logger.error(f"❌ Ошибка обработки сообщения: {e}")
             import traceback
             traceback.print_exc()
 
@@ -162,10 +178,6 @@ class AIBot:
                 logger.error(f"Ошибка подключения к Telegram API: {e}")
                 raise
             
-            # Инициализируем приложение
-            await self.app.initialize()
-            await self.app.start()
-            
             self.running = True
             
             logger.info("🚀 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
@@ -179,45 +191,44 @@ class AIBot:
             else:
                 logger.info("🔍 Парсинг каналов отключен")
             
-            # Запускаем polling
-            await self.app.run_polling(
-                allowed_updates=['message', 'callback_query'], 
-                drop_pending_updates=True
-            )
+            # Правильный запуск с async context manager
+            async with self.app:
+                await self.app.start()
+                await self.app.updater.start_polling(
+                    allowed_updates=['message', 'callback_query'], 
+                    drop_pending_updates=True
+                )
+                
+                # Ждем бесконечно
+                try:
+                    await asyncio.Future()  # Это будет ждать пока не будет отменено
+                except asyncio.CancelledError:
+                    logger.info("Получен сигнал остановки")
+                finally:
+                    await self.app.updater.stop()
+                    await self.app.stop()
                 
         except Exception as e:
             logger.error(f"Критическая ошибка запуска: {e}")
             raise
         finally:
             self.running = False
-
-    def shutdown(self):
-        """Корректное завершение работы"""
-        logger.info("Начало завершения работы...")
-        self.running = False
-
-def signal_handler(signum, frame):
-    """Обработчик сигналов для корректного завершения"""
-    logger.info(f"Получен сигнал {signum}, завершаем работу...")
-    sys.exit(0)
+            logger.info("Бот остановлен")
 
 def main():
     """Главная функция"""
-    bot = None
     try:
-        # Регистрируем обработчики сигналов
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
         # Настройка event loop для Windows
         if sys.platform.startswith("win") and sys.version_info >= (3, 8):
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
         
         # Создаем и запускаем бота
         logger.info("Создание экземпляра бота...")
         bot = AIBot()
         
         logger.info("Запуск основного цикла...")
+        
+        # Запускаем бота
         asyncio.run(bot.run())
         
     except KeyboardInterrupt:
@@ -226,14 +237,8 @@ def main():
         logger.error(f"Критическая ошибка: {e}")
         import traceback
         traceback.print_exc()
-        raise
     finally:
-        if bot:
-            try:
-                bot.shutdown()
-            except Exception as e:
-                logger.error(f"Ошибка при завершении: {e}")
-        logger.info("Бот остановлен")
+        logger.info("Завершение работы")
 
 if __name__ == "__main__":
     main()

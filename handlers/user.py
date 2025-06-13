@@ -13,7 +13,7 @@ from database.operations import (
     get_user_messages
 )
 from database.models import User, Message
-from ai.claude_client import get_claude_client
+from ai.claude_client import init_claude_client, get_claude_client
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,13 @@ class UserHandler:
         self.config = config
         self.messages_config = config.get('messages', {})
         self.features = config.get('features', {})
+        
+        # Инициализируем Claude клиента
+        try:
+            init_claude_client(config)
+            logger.info("Claude клиент инициализирован в UserHandler")
+        except Exception as e:
+            logger.warning(f"Не удалось инициализировать Claude клиента: {e}")
         
         # Callback handler
         self.callback_handler = CallbackQueryHandler(self.handle_callback)
@@ -122,24 +129,44 @@ class UserHandler:
             
             try:
                 claude_client = get_claude_client()
-                if claude_client:
+                if claude_client and claude_client.client:
+                    logger.info("Используем Claude для анализа сообщения")
                     # Получаем контекст предыдущих сообщений
                     recent_messages = await get_user_messages(user.id, limit=5)
                     context_list = [msg.text for msg in recent_messages if msg.text]
                     
-                    # Анализируем заинтересованность
-                    interest_score = await claude_client.analyze_user_interest(message_text, context_list)
-                    
-                    # Генерируем ответ
-                    response_text = await claude_client.generate_response(message_text, context_list, interest_score)
-                    
-                    ai_analysis = f"Interest: {interest_score}/100"
-                    
-                    # Обновляем скор пользователя (берем максимальный)
-                    if interest_score > user.interest_score:
-                        await update_user_interest_score(user_data.id, interest_score)
-                    
-                    logger.info(f"AI анализ: score={interest_score}")
+                    # Анализируем заинтересованность с таймаутом
+                    import asyncio
+                    try:
+                        interest_task = asyncio.wait_for(
+                            claude_client.analyze_user_interest(message_text, context_list),
+                            timeout=10.0  # 10 секунд таймаут
+                        )
+                        interest_score = await interest_task
+                        
+                        # Генерируем ответ
+                        response_task = asyncio.wait_for(
+                            claude_client.generate_response(message_text, context_list, interest_score),
+                            timeout=10.0  # 10 секунд таймаут
+                        )
+                        response_text = await response_task
+                        
+                        ai_analysis = f"Interest: {interest_score}/100"
+                        
+                        # Обновляем скор пользователя (берем максимальный)
+                        if interest_score > user.interest_score:
+                            await update_user_interest_score(user_data.id, interest_score)
+                        
+                        logger.info(f"AI анализ: score={interest_score}")
+                        
+                    except asyncio.TimeoutError:
+                        logger.warning("Claude API таймаут, используем простой анализ")
+                        interest_score = self._simple_interest_analysis(message_text)
+                        response_text = self._simple_response_generation(message_text, interest_score)
+                    except Exception as claude_error:
+                        logger.warning(f"Claude API ошибка: {claude_error}, используем простой анализ")
+                        interest_score = self._simple_interest_analysis(message_text)
+                        response_text = self._simple_response_generation(message_text, interest_score)
                 else:
                     logger.info("Claude API недоступен, используем простой анализ")
                     interest_score = self._simple_interest_analysis(message_text)
@@ -150,6 +177,8 @@ class UserHandler:
                 # Простой анализ без AI
                 interest_score = self._simple_interest_analysis(message_text)
                 response_text = self._simple_response_generation(message_text, interest_score)
+            
+            logger.info(f"Анализ завершен: score={interest_score}")
             
             # Сохраняем сообщение в БД если включено
             if self.features.get('save_all_messages', True):
@@ -163,6 +192,7 @@ class UserHandler:
                         response_sent=True
                     )
                     await create_message(message)
+                    logger.info("Сообщение сохранено в БД")
                 except Exception as e:
                     logger.error(f"Ошибка сохранения сообщения: {e}")
             
@@ -183,6 +213,8 @@ class UserHandler:
                 )
                 
                 logger.info(f"Ответ отправлен пользователю {user_data.id}: score={interest_score}")
+            else:
+                logger.info("Автоответы отключены")
             
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения: {e}")
@@ -236,9 +268,13 @@ class UserHandler:
         """Обработка callback запросов от инлайн кнопок"""
         query = update.callback_query
         try:
-            await query.answer()
-            
             data = query.data
+            
+            # Пропускаем админские callback (они начинаются с admin_)
+            if data.startswith('admin_'):
+                return
+            
+            await query.answer()
             logger.info(f"Callback от пользователя {query.from_user.id}: {data}")
             
             if data == "main_menu":

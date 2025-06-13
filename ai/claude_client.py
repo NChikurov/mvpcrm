@@ -300,9 +300,14 @@ def init_claude_client(config: Dict[str, Any]) -> ClaudeClient:
         return claude_client
     except Exception as e:
         logger.error(f"Ошибка инициализации глобального Claude клиента: {e}")
-        claude_client = ClaudeClient(config)  # Создаем с простой логикой
+        # Создаем экземпляр с простой логикой при ошибке
+        claude_client = ClaudeClient({'claude': {'api_key': ''}, 'prompts': {}})
         return claude_client
 
 def get_claude_client() -> Optional[ClaudeClient]:
     """Получение глобального клиента Claude"""
+    global claude_client
+    if claude_client is None:
+        # Создаем простой клиент если не был инициализирован
+        claude_client = ClaudeClient({'claude': {'api_key': ''}, 'prompts': {}})
     return claude_client

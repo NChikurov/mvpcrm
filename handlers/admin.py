@@ -370,15 +370,21 @@ class AdminHandler:
     async def handle_admin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка callback запросов админки"""
         query = update.callback_query
-        await query.answer()
         
         if not self._is_admin(query.from_user.id):
-            await query.edit_message_text("❌ У вас нет прав администратора")
+            await query.answer("❌ У вас нет прав администратора")
             return
         
         data = query.data
+        logger.info(f"🔧 Admin callback от {query.from_user.id}: {data}")
+        
+        # Пропускаем не-админские callback
+        if not data.startswith('admin_'):
+            return
         
         try:
+            await query.answer()
+            
             if data == "admin_panel":
                 await self._show_admin_panel(query)
             elif data == "admin_users":
@@ -394,10 +400,17 @@ class AdminHandler:
             elif data == "admin_settings":
                 await self._show_settings_callback(query)
             else:
-                await query.edit_message_text("Неизвестная команда")
+                logger.warning(f"Неизвестная админская команда: {data}")
+                await query.edit_message_text("❌ Неизвестная команда")
                 
         except Exception as e:
-            logger.error(f"Ошибка обработки admin callback: {e}")
+            logger.error(f"❌ Ошибка обработки admin callback '{data}': {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                await query.edit_message_text("❌ Произошла ошибка. Попробуйте еще раз.")
+            except:
+                pass
 
     async def _show_admin_panel(self, query):
         """Показать админ панель"""
@@ -480,15 +493,24 @@ class AdminHandler:
                 [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
             ]
             
-            await query.edit_message_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
+            try:
+                await query.edit_message_text(
+                    message,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='HTML'
+                )
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error).lower():
+                    logger.debug("Сообщение не изменилось, пропускаем обновление")
+                else:
+                    raise edit_error
             
         except Exception as e:
             logger.error(f"Ошибка показа лидов: {e}")
-            await query.edit_message_text("❌ Ошибка получения данных")
+            try:
+                await query.edit_message_text("❌ Ошибка получения данных о лидах")
+            except:
+                pass
 
     async def _show_channels_callback(self, query):
         """Показать каналы через callback"""
@@ -539,20 +561,42 @@ class AdminHandler:
             message += f"🎯 Лидов за 24ч: {stats.get('leads_24h', 0)}\n"
             message += f"📺 Активных каналов: {stats.get('active_channels', 0)}\n"
             
+            # Добавляем timestamp для избежания дублирования
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            message += f"\n⏰ Обновлено: {timestamp}"
+            
             keyboard = [
                 [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")],
                 [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
             ]
             
-            await query.edit_message_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
+            try:
+                await query.edit_message_text(
+                    message,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='HTML'
+                )
+            except Exception as edit_error:
+                if "message is not modified" in str(edit_error).lower():
+                    logger.debug("Статистика не изменилась, принудительно обновляем")
+                    # Добавляем случайный символ для принудительного обновления
+                    import random
+                    message += f" {random.choice(['📈', '📉', '📊'])}"
+                    await query.edit_message_text(
+                        message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='HTML'
+                    )
+                else:
+                    raise edit_error
             
         except Exception as e:
             logger.error(f"Ошибка показа статистики: {e}")
-            await query.edit_message_text("❌ Ошибка получения статистики")
+            try:
+                await query.edit_message_text("❌ Ошибка получения статистики")
+            except:
+                pass
 
     async def _show_broadcast_info(self, query):
         """Показать информацию о рассылке"""
