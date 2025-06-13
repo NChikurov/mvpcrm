@@ -26,61 +26,84 @@ class UserHandler:
         self.features = config.get('features', {})
         
         # Инициализация Claude клиента
-        init_claude_client(config)
+        try:
+            init_claude_client(config)
+            logger.info("Claude клиент инициализирован в UserHandler")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации Claude клиента: {e}")
         
         # Callback handler
         self.callback_handler = CallbackQueryHandler(self.handle_callback)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /start"""
-        user_data = update.effective_user
-        
-        # Создаем или обновляем пользователя
-        user = User(
-            telegram_id=user_data.id,
-            username=user_data.username,
-            first_name=user_data.first_name,
-            last_name=user_data.last_name
-        )
-        
         try:
-            await create_user(user)
-            logger.info(f"Новый пользователь: {user_data.id} (@{user_data.username})")
+            logger.info(f"Команда /start от пользователя {update.effective_user.id}")
+            
+            user_data = update.effective_user
+            
+            # Создаем или обновляем пользователя
+            user = User(
+                telegram_id=user_data.id,
+                username=user_data.username,
+                first_name=user_data.first_name,
+                last_name=user_data.last_name
+            )
+            
+            try:
+                await create_user(user)
+                logger.info(f"Пользователь создан/обновлен: {user_data.id} (@{user_data.username})")
+            except Exception as e:
+                logger.error(f"Ошибка создания пользователя: {e}")
+            
+            # Отправляем приветственное сообщение
+            welcome_message = self.messages_config.get('welcome', 'Добро пожаловать!')
+            keyboard = self._get_main_keyboard()
+            
+            await update.message.reply_text(
+                welcome_message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+            
         except Exception as e:
-            logger.error(f"Ошибка создания пользователя: {e}")
-        
-        # Отправляем приветственное сообщение
-        welcome_message = self.messages_config.get('welcome', 'Добро пожаловать!')
-        keyboard = self._get_main_keyboard()
-        
-        await update.message.reply_text(
-            welcome_message,
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
+            logger.error(f"Ошибка в команде /start: {e}")
+            await update.message.reply_text("Произошла ошибка. Попробуйте еще раз.")
 
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /help"""
-        help_message = self.messages_config.get('help', 'Справка по боту')
-        await update.message.reply_text(help_message, parse_mode='HTML')
+        try:
+            logger.info(f"Команда /help от пользователя {update.effective_user.id}")
+            help_message = self.messages_config.get('help', 'Справка по боту')
+            await update.message.reply_text(help_message, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Ошибка в команде /help: {e}")
+            await update.message.reply_text("Ошибка при получении справки.")
 
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /menu"""
-        menu_message = self.messages_config.get('menu', 'Главное меню')
-        keyboard = self._get_main_keyboard()
-        
-        await update.message.reply_text(
-            menu_message,
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
+        try:
+            logger.info(f"Команда /menu от пользователя {update.effective_user.id}")
+            menu_message = self.messages_config.get('menu', 'Главное меню')
+            keyboard = self._get_main_keyboard()
+            
+            await update.message.reply_text(
+                menu_message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка в команде /menu: {e}")
+            await update.message.reply_text("Ошибка при показе меню.")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка текстовых сообщений пользователей"""
-        user_data = update.effective_user
-        message_text = update.message.text
-        
         try:
+            user_data = update.effective_user
+            message_text = update.message.text
+            
+            logger.info(f"Сообщение от пользователя {user_data.id}: {message_text[:50]}...")
+            
             # Получаем пользователя из БД
             user = await get_user_by_telegram_id(user_data.id)
             if not user:
@@ -92,6 +115,7 @@ class UserHandler:
                     last_name=user_data.last_name
                 )
                 user = await create_user(user)
+                logger.info(f"Создан новый пользователь: {user_data.id}")
             
             # Увеличиваем счетчик сообщений
             await increment_user_message_count(user_data.id)
@@ -99,42 +123,54 @@ class UserHandler:
             # Анализируем сообщение через Claude (если включено)
             interest_score = 0
             ai_analysis = ""
-            response_text = "Спасибо за ваше сообщение!"
+            response_text = "Спасибо за ваше сообщение! Мы обязательно ответим."
             
             if self.features.get('auto_response', True):
                 claude_client = get_claude_client()
                 if claude_client:
-                    # Получаем контекст предыдущих сообщений
-                    recent_messages = await get_user_messages(user.id, limit=5)
-                    context = [msg.text for msg in recent_messages]
-                    
-                    # Анализируем заинтересованность
-                    interest_score = await claude_client.analyze_user_interest(
-                        message_text, context
-                    )
-                    
-                    # Генерируем ответ
-                    response_text = await claude_client.generate_response(
-                        message_text, context, interest_score
-                    )
-                    
-                    ai_analysis = f"Interest: {interest_score}/100"
-                    
-                    # Обновляем скор пользователя (берем максимальный)
-                    if interest_score > user.interest_score:
-                        await update_user_interest_score(user_data.id, interest_score)
+                    try:
+                        # Получаем контекст предыдущих сообщений
+                        recent_messages = await get_user_messages(user.id, limit=5)
+                        context = [msg.text for msg in recent_messages]
+                        
+                        # Анализируем заинтересованность
+                        interest_score = await claude_client.analyze_user_interest(
+                            message_text, context
+                        )
+                        
+                        # Генерируем ответ
+                        response_text = await claude_client.generate_response(
+                            message_text, context, interest_score
+                        )
+                        
+                        ai_analysis = f"Interest: {interest_score}/100"
+                        
+                        # Обновляем скор пользователя (берем максимальный)
+                        if interest_score > user.interest_score:
+                            await update_user_interest_score(user_data.id, interest_score)
+                            
+                        logger.info(f"AI анализ: score={interest_score}, ответ готов")
+                        
+                    except Exception as e:
+                        logger.error(f"Ошибка AI анализа: {e}")
+                        response_text = "Спасибо за ваше сообщение! Мы обработаем его в ближайшее время."
+                else:
+                    logger.warning("Claude клиент недоступен, используем базовый ответ")
             
             # Сохраняем сообщение в БД (если включено)
             if self.features.get('save_all_messages', True):
-                message = Message(
-                    user_id=user.id,
-                    telegram_message_id=update.message.message_id,
-                    text=message_text,
-                    ai_analysis=ai_analysis,
-                    interest_score=interest_score,
-                    response_sent=True
-                )
-                await create_message(message)
+                try:
+                    message = Message(
+                        user_id=user.id,
+                        telegram_message_id=update.message.message_id,
+                        text=message_text,
+                        ai_analysis=ai_analysis,
+                        interest_score=interest_score,
+                        response_sent=True
+                    )
+                    await create_message(message)
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения сообщения: {e}")
             
             # Отправляем ответ
             keyboard = None
@@ -149,21 +185,28 @@ class UserHandler:
                 parse_mode='HTML'
             )
             
-            logger.info(f"Обработано сообщение от {user_data.id}: score={interest_score}")
+            logger.info(f"Ответ отправлен пользователю {user_data.id}: score={interest_score}")
             
         except Exception as e:
             logger.error(f"Ошибка обработки сообщения: {e}")
+            import traceback
+            traceback.print_exc()
+            
             error_message = self.messages_config.get('error', 'Произошла ошибка')
-            await update.message.reply_text(error_message)
+            try:
+                await update.message.reply_text(error_message)
+            except:
+                logger.error("Не удалось отправить сообщение об ошибке")
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка callback запросов от инлайн кнопок"""
         query = update.callback_query
-        await query.answer()
-        
-        data = query.data
-        
         try:
+            await query.answer()
+            
+            data = query.data
+            logger.info(f"Callback от пользователя {query.from_user.id}: {data}")
+            
             if data == "main_menu":
                 await self._show_main_menu(query)
             elif data == "help":

@@ -49,6 +49,9 @@ class ChannelParser:
         self.api_id = self.telegram_api_config.get('api_id', 0)
         self.api_hash = self.telegram_api_config.get('api_hash', '')
         
+        # Зашиваем номер телефона для демо (замените на ваш)
+        self.phone_number = "+7922999999"  # ЗАМЕНИТЕ НА ВАШ НОМЕР
+        
         logger.info(f"Парсер инициализирован: {len(self.channels)} каналов ({self.channels})")
         
         if not self.api_id or not self.api_hash:
@@ -61,13 +64,19 @@ class ChannelParser:
                 logger.info("Telegram API не настроен, используется демо режим")
                 return False
             
-            self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
+            # Создаем клиента с уникальным именем сессии
+            session_name = f'parser_session_{self.api_id}'
+            self.client = TelegramClient(session_name, self.api_id, self.api_hash)
             
-            # Для реального использования раскомментируйте:
-            await self.client.start()
-            
-            logger.info("Telegram клиент инициализирован")
-            return True
+            # Автоматическая авторизация с номером телефона
+            try:
+                await self.client.start(phone=self.phone_number)
+                logger.info("Telegram клиент успешно инициализирован")
+                return True
+            except Exception as auth_error:
+                logger.error(f"Ошибка авторизации: {auth_error}")
+                logger.info("Переключение на демо режим")
+                return False
             
         except Exception as e:
             logger.error(f"Ошибка инициализации Telegram клиента: {e}")
@@ -113,7 +122,10 @@ class ChannelParser:
         """Остановка парсинга"""
         self.is_running = False
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except:
+                pass
         logger.info("Парсинг остановлен")
 
     async def _init_channels_in_db(self):
@@ -355,4 +367,3 @@ class ChannelParser:
             'min_score': self.min_interest_score,
             'api_configured': bool(self.api_id and self.api_hash)
         }
-                
