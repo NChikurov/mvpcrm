@@ -64,7 +64,7 @@ class ChannelParser:
             self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
             
             # Для реального использования раскомментируйте:
-            # await self.client.start()
+            await self.client.start()
             
             logger.info("Telegram клиент инициализирован")
             return True
