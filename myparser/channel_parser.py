@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 from telethon import TelegramClient
-from telethon.tl.types import User, Channel
+from telethon.tl.types import User
 
 from database.operations import (
     create_or_update_channel, get_active_channels, create_lead,
@@ -41,8 +41,8 @@ class ChannelParser:
         try:
             # Создаем клиент без API credentials для демо
             # В реальном проекте нужно получить api_id и api_hash на my.telegram.org
-            api_id = 12345  # Замените на реальный
-            api_hash = "your_api_hash"  # Замените на реальный
+            api_id = 21829766  # Замените на реальный
+            api_hash = 'be6695157c6a19bf793b3e475ba46457'  # Замените на реальный
             
             self.client = TelegramClient('bot_session', api_id, api_hash)
             # await self.client.start()  # Закомментировано для демо
