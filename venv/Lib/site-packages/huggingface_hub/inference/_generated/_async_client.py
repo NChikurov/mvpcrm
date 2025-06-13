@@ -122,7 +122,7 @@ class AsyncInferenceClient:
             path will be appended to the base URL (see the [TGI Messages API](https://huggingface.co/docs/text-generation-inference/en/messages_api)
             documentation for details). When passing a URL as `model`, the client will not append any suffix path to it.
         provider (`str`, *optional*):
-            Name of the provider to use for inference. Can be `"black-forest-labs"`, `"cerebras"`, `"cohere"`, `"fal-ai"`, `"fireworks-ai"`, `"hf-inference"`, `"hyperbolic"`, `"nebius"`, `"novita"`, `"nscale"`, `"openai"`, `"replicate"`, "sambanova"` or `"together"`.
+            Name of the provider to use for inference. Can be `"black-forest-labs"`, `"cerebras"`, `"cohere"`, `"fal-ai"`, `"featherless-ai"`, `"fireworks-ai"`, `"groq"`, `"hf-inference"`, `"hyperbolic"`, `"nebius"`, `"novita"`, `"nscale"`, `"openai"`, `"replicate"`, "sambanova"` or `"together"`.
             Defaults to "auto" i.e. the first of the providers available for the model, sorted by the user's order in https://hf.co/settings/inference-providers.
             If model is a URL or `base_url` is passed, then `provider` is not used.
         token (`str`, *optional*):
@@ -1737,9 +1737,8 @@ class AsyncInferenceClient:
         model_id = model or self.model
         provider_helper = get_provider_helper(self.provider, task="table-question-answering", model=model_id)
         request_parameters = provider_helper.prepare_request(
-            inputs=None,
+            inputs={"query": query, "table": table},
             parameters={"model": model, "padding": padding, "sequential": sequential, "truncation": truncation},
-            extra_payload={"query": query, "table": table},
             headers=self.headers,
             model=model_id,
             api_key=self.token,
@@ -3260,7 +3259,7 @@ class AsyncInferenceClient:
         return ZeroShotImageClassificationOutputElement.parse_obj_as_list(response)
 
     @_deprecate_method(
-        version="0.33.0",
+        version="0.35.0",
         message=(
             "HF Inference API is getting revamped and will only support warm models in the future (no cold start allowed)."
             " Use `HfApi.list_models(..., inference_provider='...')` to list warm models per provider."
@@ -3496,7 +3495,7 @@ class AsyncInferenceClient:
             return response.status == 200
 
     @_deprecate_method(
-        version="0.33.0",
+        version="0.35.0",
         message=(
             "HF Inference API is getting revamped and will only support warm models in the future (no cold start allowed)."
             " Use `HfApi.model_info` to get the model status both with HF Inference API and external providers."
