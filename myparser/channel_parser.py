@@ -24,28 +24,47 @@ class ChannelParser:
     def __init__(self, config):
         self.config = config
         self.parsing_config = config.get('parsing', {})
+        self.telegram_api_config = config.get('telegram_api', {})
         self.is_running = False
         self.client = None
         
         # Настройки парсинга
         self.enabled = self.parsing_config.get('enabled', True)
-        self.channels = self.parsing_config.get('channels', [])
+        
+        # Безопасное получение каналов с проверкой типа
+        channels_raw = self.parsing_config.get('channels', [])
+        if isinstance(channels_raw, list):
+            self.channels = [str(ch) for ch in channels_raw]  # Преобразуем все в строки
+        elif isinstance(channels_raw, (str, int)):
+            self.channels = [str(channels_raw)]  # Если один канал - делаем список
+        else:
+            self.channels = []
+            logger.warning(f"Некорректный формат каналов в конфигурации: {channels_raw}")
+        
         self.min_interest_score = self.parsing_config.get('min_interest_score', 60)
         self.parse_interval = self.parsing_config.get('parse_interval', 3600)  # 1 час
         self.max_messages_per_parse = self.parsing_config.get('max_messages_per_parse', 50)
         
-        logger.info(f"Парсер инициализирован: {len(self.channels)} каналов")
+        # API данные для Telegram
+        self.api_id = self.telegram_api_config.get('api_id', 0)
+        self.api_hash = self.telegram_api_config.get('api_hash', '')
+        
+        logger.info(f"Парсер инициализирован: {len(self.channels)} каналов ({self.channels})")
+        
+        if not self.api_id or not self.api_hash:
+            logger.warning("API ID или API Hash не настроены, парсинг будет работать в демо режиме")
 
     async def init_client(self):
         """Инициализация Telegram клиента"""
         try:
-            # Создаем клиент без API credentials для демо
-            # В реальном проекте нужно получить api_id и api_hash на my.telegram.org
-            api_id = 21829766  # Замените на реальный
-            api_hash = 'be6695157c6a19bf793b3e475ba46457'  # Замените на реальный
+            if not self.api_id or not self.api_hash:
+                logger.info("Telegram API не настроен, используется демо режим")
+                return False
             
-            self.client = TelegramClient('bot_session', api_id, api_hash)
-            # await self.client.start()  # Закомментировано для демо
+            self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
+            
+            # Для реального использования раскомментируйте:
+            # await self.client.start()
             
             logger.info("Telegram клиент инициализирован")
             return True
@@ -101,7 +120,7 @@ class ChannelParser:
         """Инициализация каналов в базе данных"""
         for channel_username in self.channels:
             channel = ParsedChannel(
-                channel_username=channel_username,
+                channel_username=str(channel_username),
                 channel_title=f"Канал {channel_username}",
                 enabled=True
             )
@@ -333,5 +352,7 @@ class ChannelParser:
             'enabled': self.enabled,
             'channels_count': len(self.channels),
             'interval': self.parse_interval,
-            'min_score': self.min_interest_score
+            'min_score': self.min_interest_score,
+            'api_configured': bool(self.api_id and self.api_hash)
         }
+                
