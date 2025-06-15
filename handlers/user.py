@@ -1,5 +1,5 @@
 """
-Обработчики пользователей
+Обработчики пользователей - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import logging
@@ -8,9 +8,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
 from database.operations import (
-    create_user, get_user_by_telegram_id, create_message,
-    update_user_interest_score, increment_user_message_count,
-    get_user_messages
+    create_user, get_user_by_telegram_id, save_message,
+    update_user_activity, get_messages
 )
 from database.models import User, Message
 from ai.claude_client import init_claude_client, get_claude_client
@@ -74,7 +73,7 @@ class UserHandler:
             logger.error(f"Ошибка в команде /start: {e}")
             await update.message.reply_text("Добро пожаловать! Произошла небольшая ошибка, но я готов работать.")
 
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка команды /help"""
         try:
             logger.info(f"Команда /help от пользователя {update.effective_user.id}")
@@ -119,15 +118,14 @@ class UserHandler:
                     first_name=user_data.first_name,
                     last_name=user_data.last_name
                 )
-                user = await create_user(user)
+                await create_user(user)
                 logger.info(f"Создан новый пользователь: {user_data.id}")
             
-            # Увеличиваем счетчик сообщений
-            await increment_user_message_count(user_data.id)
+            # Обновляем активность пользователя
+            await update_user_activity(user_data.id)
             
             # Анализируем сообщение
             interest_score = 0
-            ai_analysis = ""
             response_text = "Спасибо за ваше сообщение!"
             
             try:
@@ -135,7 +133,7 @@ class UserHandler:
                 if claude_client and claude_client.client:
                     logger.info("Используем Claude для анализа сообщения")
                     # Получаем контекст предыдущих сообщений
-                    recent_messages = await get_user_messages(user.id, limit=5)
+                    recent_messages = await get_messages(user_id=user.telegram_id, limit=5)
                     context_list = [msg.text for msg in recent_messages if msg.text]
                     
                     # Анализируем заинтересованность с таймаутом
@@ -153,12 +151,6 @@ class UserHandler:
                             timeout=10.0  # 10 секунд таймаут
                         )
                         response_text = await response_task
-                        
-                        ai_analysis = f"Interest: {interest_score}/100"
-                        
-                        # Обновляем скор пользователя (берем максимальный)
-                        if interest_score > user.interest_score:
-                            await update_user_interest_score(user_data.id, interest_score)
                         
                         logger.info(f"AI анализ: score={interest_score}")
                         
@@ -187,14 +179,13 @@ class UserHandler:
             if self.features.get('save_all_messages', True):
                 try:
                     message = Message(
-                        user_id=user.id,
                         telegram_message_id=update.message.message_id,
+                        user_id=user.telegram_id,
+                        chat_id=update.effective_chat.id,
                         text=message_text,
-                        ai_analysis=ai_analysis,
-                        interest_score=interest_score,
-                        response_sent=True
+                        interest_score=interest_score
                     )
-                    await create_message(message)
+                    await save_message(message)
                     logger.info("Сообщение сохранено в БД")
                 except Exception as e:
                     logger.error(f"Ошибка сохранения сообщения: {e}")

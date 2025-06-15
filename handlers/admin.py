@@ -1,5 +1,5 @@
 """
-Обработчики админских команд
+Обработчики админских команд - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import asyncio
@@ -9,9 +9,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, CallbackQueryHandler
 
 from database.operations import (
-    get_all_users, get_users_by_interest_score, get_leads_by_score,
-    get_recent_leads, get_active_channels, create_or_update_channel,
-    get_stats, create_broadcast, update_broadcast_stats, get_setting, set_setting
+    get_users, get_leads, get_active_channels, 
+    create_or_update_channel, get_bot_stats, get_setting, set_setting
 )
 from database.models import ParsedChannel, Broadcast
 
@@ -68,138 +67,38 @@ class AdminHandler:
             parse_mode='HTML'
         )
 
-    async def show_users(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать список пользователей"""
+    async def show_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать статистику"""
         if not await self._admin_required(update):
             return
         
         try:
-            # Получаем пользователей с высоким скором
-            interested_users = await get_users_by_interest_score(min_score=70)
-            all_users = await get_all_users(limit=20)
+            stats = await get_bot_stats()
             
-            message = "👥 <b>Пользователи бота</b>\n\n"
+            message = "📊 <b>Статистика бота</b>\n\n"
             
-            if interested_users:
-                message += "🔥 <b>Заинтересованные пользователи (score ≥ 70):</b>\n"
-                for user in interested_users[:10]:
-                    username = f"@{user.username}" if user.username else "без username"
-                    message += f"• {user.first_name} ({username}) - {user.interest_score}/100\n"
-                message += "\n"
+            message += "👥 <b>Пользователи:</b>\n"
+            message += f"• Всего: {stats.get('total_users', 0)}\n"
+            message += f"• Активные за 24ч: {stats.get('active_users_today', 0)}\n\n"
             
-            message += f"📋 <b>Последние пользователи ({len(all_users)} из всех):</b>\n"
-            for user in all_users[:10]:
-                username = f"@{user.username}" if user.username else "без username"
-                activity = user.last_activity.strftime("%d.%m %H:%M") if user.last_activity else "никогда"
-                message += f"• {user.first_name} ({username}) - {user.interest_score}/100, активен: {activity}\n"
+            message += "💬 <b>Сообщения:</b>\n"
+            message += f"• Всего: {stats.get('total_messages', 0)}\n\n"
             
-            keyboard = [
-                [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
-            ]
+            message += "🎯 <b>Лиды:</b>\n"
+            message += f"• Всего: {stats.get('total_leads', 0)}\n"
+            message += f"• За 24 часа: {stats.get('leads_today', 0)}\n"
+            message += f"• За неделю: {stats.get('leads_week', 0)}\n\n"
             
-            await update.message.reply_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
+            # Конверсия
+            if stats.get('total_users', 0) > 0:
+                conversion = stats.get('total_leads', 0) / stats.get('total_users', 1) * 100
+                message += f"📈 <b>Конверсия в лиды:</b> {conversion:.1f}%"
+            
+            await update.message.reply_text(message, parse_mode='HTML')
             
         except Exception as e:
-            logger.error(f"Ошибка получения пользователей: {e}")
-            await update.message.reply_text("❌ Ошибка получения данных")
-
-    async def show_leads(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать лиды"""
-        if not await self._admin_required(update):
-            return
-        
-        try:
-            recent_leads = await get_recent_leads(hours=24)
-            all_leads = await get_leads_by_score(min_score=60, limit=20)
-            
-            message = "🎯 <b>Потенциальные клиенты</b>\n\n"
-            
-            if recent_leads:
-                message += f"🔥 <b>Новые лиды за 24 часа ({len(recent_leads)}):</b>\n"
-                for lead in recent_leads[:5]:
-                    username = f"@{lead.username}" if lead.username else "без username"
-                    source = lead.source_channel.replace('@', '')
-                    message += f"• {lead.first_name or 'Аноним'} ({username})\n"
-                    message += f"  Скор: {lead.interest_score}/100, из: {source}\n"
-                    message += f"  Сообщение: {lead.message_text[:100]}...\n\n"
-            
-            if all_leads:
-                message += f"📋 <b>Все лиды (score ≥ 60, показано {min(len(all_leads), 10)}):</b>\n"
-                for lead in all_leads[:10]:
-                    username = f"@{lead.username}" if lead.username else "без username"
-                    created = lead.created_at.strftime("%d.%m %H:%M") if lead.created_at else "неизвестно"
-                    message += f"• {lead.first_name or 'Аноним'} ({username}) - {lead.interest_score}/100, {created}\n"
-            
-            if not recent_leads and not all_leads:
-                message += "Лидов пока нет. Проверьте настройки парсинга каналов."
-            
-            keyboard = [
-                [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
-            ]
-            
-            await update.message.reply_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения лидов: {e}")
-            await update.message.reply_text("❌ Ошибка получения данных")
-
-    async def manage_channels(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Управление каналами для парсинга"""
-        if not await self._admin_required(update):
-            return
-        
-        try:
-            channels = await get_active_channels()
-            
-            message = "📺 <b>Каналы для парсинга</b>\n\n"
-            
-            if channels:
-                for channel in channels:
-                    status = "✅" if channel.enabled else "❌"
-                    last_parsed = "никогда"
-                    if channel.last_parsed:
-                        last_parsed = channel.last_parsed.strftime("%d.%m %H:%M")
-                    
-                    message += f"{status} <code>{channel.channel_username}</code>\n"
-                    message += f"   📋 {channel.channel_title or 'Без названия'}\n"
-                    message += f"   📄 Спарсено: {channel.total_messages_parsed} сообщений\n"
-                    message += f"   🎯 Лидов найдено: {channel.leads_found}\n"
-                    message += f"   ⏰ Последний парсинг: {last_parsed}\n\n"
-            else:
-                message += "Каналы не настроены.\n"
-            
-            message += "<b>💡 Как добавить каналы:</b>\n"
-            message += "1. Добавьте бота в канал как администратора\n"
-            message += "2. Укажите каналы в переменной PARSING_CHANNELS в .env файле\n"
-            message += "3. Формат: <code>@channel1,@channel2,-1001234567890</code>\n"
-            message += "4. Перезапустите бота\n\n"
-            message += "📋 <b>Текущие настройки:</b>\n"
-            message += f"• Парсинг: {'✅ Включен' if self.config.get('parsing', {}).get('enabled') else '❌ Отключен'}\n"
-            message += f"• Интервал: {self.config.get('parsing', {}).get('parse_interval', 3600)} сек\n"
-            message += f"• Мин. скор: {self.config.get('parsing', {}).get('min_interest_score', 60)}"
-            
-            keyboard = [
-                [InlineKeyboardButton("🔄 Обновить", callback_data="admin_channels")],
-                [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
-            ]
-            
-            await update.message.reply_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения каналов: {e}")
-            await update.message.reply_text("❌ Ошибка получения данных")
+            logger.error(f"Ошибка получения статистики: {e}")
+            await update.message.reply_text("❌ Ошибка получения статистики")
 
     async def broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Рассылка сообщения всем пользователям"""
@@ -220,20 +119,11 @@ class AdminHandler:
         
         try:
             # Получаем всех пользователей
-            users = await get_all_users(limit=1000)
+            users = await get_users(limit=1000)
             
             if not users:
                 await update.message.reply_text("❌ Нет пользователей для рассылки")
                 return
-            
-            # Создаем запись о рассылке
-            broadcast = Broadcast(
-                admin_id=update.effective_user.id,
-                message_text=broadcast_text,
-                total_users=len(users),
-                status="sending"
-            )
-            broadcast = await create_broadcast(broadcast)
             
             # Отправляем уведомление о начале рассылки
             await update.message.reply_text(
@@ -263,11 +153,6 @@ class AdminHandler:
                     failed_count += 1
                     logger.warning(f"Не удалось отправить сообщение пользователю {user.telegram_id}: {e}")
             
-            # Обновляем статистику рассылки
-            await update_broadcast_stats(
-                broadcast.id, sent_count, failed_count, "completed"
-            )
-            
             # Отправляем отчет
             success_rate = (sent_count/(sent_count+failed_count)*100) if (sent_count+failed_count) > 0 else 0
             await update.message.reply_text(
@@ -281,94 +166,6 @@ class AdminHandler:
         except Exception as e:
             logger.error(f"Ошибка рассылки: {e}")
             await update.message.reply_text("❌ Ошибка при рассылке")
-
-    async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать статистику"""
-        if not await self._admin_required(update):
-            return
-        
-        try:
-            stats = await get_stats()
-            
-            message = "📊 <b>Статистика бота</b>\n\n"
-            
-            message += "👥 <b>Пользователи:</b>\n"
-            message += f"• Всего: {stats.get('total_users', 0)}\n"
-            message += f"• Заинтересованные (score ≥ 70): {stats.get('interested_users', 0)}\n"
-            message += f"• Активные за 24ч: {stats.get('active_users_24h', 0)}\n\n"
-            
-            message += "💬 <b>Сообщения:</b>\n"
-            message += f"• Всего: {stats.get('total_messages', 0)}\n"
-            message += f"• За 24 часа: {stats.get('messages_24h', 0)}\n\n"
-            
-            message += "🎯 <b>Лиды:</b>\n"
-            message += f"• Всего: {stats.get('total_leads', 0)}\n"
-            message += f"• За 24 часа: {stats.get('leads_24h', 0)}\n"
-            message += f"• Горячие (score ≥ 80): {stats.get('hot_leads', 0)}\n\n"
-            
-            message += "📺 <b>Парсинг:</b>\n"
-            message += f"• Активных каналов: {stats.get('active_channels', 0)}\n"
-            
-            # Конверсия
-            if stats.get('total_users', 0) > 0:
-                conversion = stats.get('interested_users', 0) / stats.get('total_users', 1) * 100
-                message += f"\n📈 <b>Конверсия в заинтересованных:</b> {conversion:.1f}%"
-            
-            keyboard = [
-                [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")],
-                [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
-            ]
-            
-            await update.message.reply_text(
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='HTML'
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка получения статистики: {e}")
-            await update.message.reply_text("❌ Ошибка получения статистики")
-
-    async def settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Настройки бота"""
-        if not await self._admin_required(update):
-            return
-        
-        message = "⚙️ <b>Настройки бота</b>\n\n"
-        
-        # Проверяем Claude API
-        from ai.claude_client import get_claude_client
-        claude_client = get_claude_client()
-        if claude_client:
-            stats = claude_client.get_usage_stats()
-            message += f"🤖 <b>Claude API:</b> {'✅ Активен' if stats['api_available'] else '⚠️ Простой режим'}\n"
-            message += f"📦 Модель: {stats['model']}\n"
-        else:
-            message += "🤖 <b>Claude API:</b> ❌ Не инициализирован\n"
-        
-        message += f"\n👑 <b>Администраторы:</b> {len(self.admin_ids)}\n"
-        message += f"💬 <b>Автоответы:</b> {'✅' if self.config.get('features', {}).get('auto_response') else '❌'}\n"
-        message += f"💾 <b>Сохранение сообщений:</b> {'✅' if self.config.get('features', {}).get('save_all_messages') else '❌'}\n"
-        
-        message += f"\n📺 <b>Парсинг каналов:</b>\n"
-        message += f"• Статус: {'✅ Включен' if self.config.get('parsing', {}).get('enabled') else '❌ Отключен'}\n"
-        message += f"• Каналов настроено: {len(self.config.get('parsing', {}).get('channels', []))}\n"
-        message += f"• Интервал: {self.config.get('parsing', {}).get('parse_interval', 3600)} сек\n"
-        message += f"• Мин. скор для лида: {self.config.get('parsing', {}).get('min_interest_score', 60)}\n"
-        
-        message += "\n<b>💡 Настройка:</b>\n"
-        message += "Основные параметры в файлах <code>.env</code> и <code>config.yaml</code>\n"
-        message += "После изменений перезапустите бота."
-        
-        keyboard = [
-            [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
-        ]
-        
-        await update.message.reply_text(
-            message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
 
     async def handle_admin_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработка callback запросов админки"""
@@ -437,25 +234,21 @@ class AdminHandler:
     async def _show_users_callback(self, query):
         """Показать пользователей через callback"""
         try:
-            interested_users = await get_users_by_interest_score(min_score=70)
-            all_users = await get_all_users(limit=10)
+            users = await get_users(limit=10)
             
             # Добавляем timestamp для избежания дублирования
             timestamp = datetime.now().strftime("%H:%M:%S")
             
             message = f"👥 <b>Пользователи бота</b> (обновлено {timestamp})\n\n"
             
-            if interested_users:
-                message += f"🔥 <b>Заинтересованные ({len(interested_users)}):</b>\n"
-                for user in interested_users[:5]:
+            if users:
+                message += f"📋 <b>Последние пользователи ({len(users)}):</b>\n"
+                for user in users[:5]:
                     username = f"@{user.username}" if user.username else "без username"
-                    message += f"• {user.first_name} ({username}) - {user.interest_score}/100\n"
-                message += "\n"
-            
-            message += f"📋 <b>Последние пользователи:</b>\n"
-            for user in all_users[:5]:
-                username = f"@{user.username}" if user.username else "без username"
-                message += f"• {user.first_name} ({username}) - {user.interest_score}/100\n"
+                    activity = user.last_activity.strftime("%d.%m %H:%M") if user.last_activity else "никогда"
+                    message += f"• {user.first_name} ({username}) - активен: {activity}\n"
+            else:
+                message += "Пользователей пока нет."
             
             keyboard = [
                 [InlineKeyboardButton("🔄 Обновить", callback_data="admin_users")],
@@ -475,22 +268,30 @@ class AdminHandler:
     async def _show_leads_callback(self, query):
         """Показать лиды через callback"""
         try:
-            recent_leads = await get_recent_leads(hours=24)
+            leads = await get_leads(limit=10)
             
             # Добавляем timestamp для избежания дублирования
             timestamp = datetime.now().strftime("%H:%M:%S")
             
             message = f"🎯 <b>Потенциальные клиенты</b> (обновлено {timestamp})\n\n"
             
-            if recent_leads:
+            if leads:
+                # Фильтруем лиды за последние 24 часа
+                recent_leads = [
+                    lead for lead in leads 
+                    if lead.created_at and (datetime.now() - lead.created_at).days == 0
+                ]
+                
                 message += f"🔥 <b>За 24 часа найдено: {len(recent_leads)}</b>\n\n"
-                for lead in recent_leads[:3]:
+                
+                for lead in leads[:3]:
                     username = f"@{lead.username}" if lead.username else "без username"
                     message += f"• {lead.first_name or 'Аноним'} ({username})\n"
                     message += f"  Скор: {lead.interest_score}/100\n"
-                    message += f"  Из: {lead.source_channel.replace('@', '')}\n\n"
+                    if lead.source_channel:
+                        message += f"  Из: {lead.source_channel.replace('@', '')}\n\n"
             else:
-                message += "За последние 24 часа новых лидов нет.\n\n"
+                message += "Лидов пока нет.\n\n"
                 message += "💡 Проверьте настройки парсинга каналов."
             
             keyboard = [
@@ -522,7 +323,7 @@ class AdminHandler:
                 for channel in channels[:5]:  # Показываем только первые 5
                     status = "✅" if channel.enabled else "❌"
                     message += f"{status} <code>{channel.channel_username}</code>\n"
-                    message += f"   📄 {channel.total_messages_parsed} сообщений, 🎯 {channel.leads_found} лидов\n"
+                    message += f"   📄 {channel.total_messages} сообщений, 🎯 {channel.leads_found} лидов\n"
                 
                 if len(channels) > 5:
                     message += f"\n... и еще {len(channels) - 5} каналов"
@@ -551,17 +352,16 @@ class AdminHandler:
     async def _show_stats_callback(self, query):
         """Показать статистику через callback"""
         try:
-            stats = await get_stats()
+            stats = await get_bot_stats()
             
             # Добавляем timestamp для избежания дублирования
             timestamp = datetime.now().strftime("%H:%M:%S")
             
             message = f"📊 <b>Статистика</b> (обновлено {timestamp})\n\n"
             message += f"👥 Пользователей: {stats.get('total_users', 0)}\n"
-            message += f"🔥 Заинтересованных: {stats.get('interested_users', 0)}\n"
-            message += f"💬 Сообщений за 24ч: {stats.get('messages_24h', 0)}\n"
-            message += f"🎯 Лидов за 24ч: {stats.get('leads_24h', 0)}\n"
-            message += f"📺 Активных каналов: {stats.get('active_channels', 0)}\n"
+            message += f"💬 Сообщений: {stats.get('total_messages', 0)}\n"
+            message += f"🎯 Лидов: {stats.get('total_leads', 0)}\n"
+            message += f"🔥 За сегодня: {stats.get('leads_today', 0)}\n"
             
             keyboard = [
                 [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")],
