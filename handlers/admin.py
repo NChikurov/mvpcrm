@@ -24,8 +24,11 @@ class AdminHandler:
         self.config = config
         self.admin_ids = config.get('bot', {}).get('admin_ids', [])
         
-        # Callback handler
-        self.callback_handler = CallbackQueryHandler(self.handle_admin_callback)
+        # Callback handler - ТОЛЬКО для админских callback
+        self.callback_handler = CallbackQueryHandler(
+            self.handle_admin_callback,
+            pattern=r'^admin_'  # Только callback начинающиеся с admin_
+        )
 
     def _is_admin(self, user_id: int) -> bool:
         """Проверка является ли пользователь админом"""
@@ -378,10 +381,6 @@ class AdminHandler:
         data = query.data
         logger.info(f"🔧 Admin callback от {query.from_user.id}: {data}")
         
-        # Пропускаем не-админские callback
-        if not data.startswith('admin_'):
-            return
-        
         try:
             await query.answer()
             
@@ -441,7 +440,10 @@ class AdminHandler:
             interested_users = await get_users_by_interest_score(min_score=70)
             all_users = await get_all_users(limit=10)
             
-            message = "👥 <b>Пользователи бота</b>\n\n"
+            # Добавляем timestamp для избежания дублирования
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            message = f"👥 <b>Пользователи бота</b> (обновлено {timestamp})\n\n"
             
             if interested_users:
                 message += f"🔥 <b>Заинтересованные ({len(interested_users)}):</b>\n"
@@ -468,14 +470,17 @@ class AdminHandler:
             
         except Exception as e:
             logger.error(f"Ошибка показа пользователей: {e}")
-            await query.edit_message_text("❌ Ошибка получения данных")
+            await query.edit_message_text("❌ Ошибка получения данных о пользователях")
 
     async def _show_leads_callback(self, query):
         """Показать лиды через callback"""
         try:
             recent_leads = await get_recent_leads(hours=24)
             
-            message = "🎯 <b>Потенциальные клиенты</b>\n\n"
+            # Добавляем timestamp для избежания дублирования
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            message = f"🎯 <b>Потенциальные клиенты</b> (обновлено {timestamp})\n\n"
             
             if recent_leads:
                 message += f"🔥 <b>За 24 часа найдено: {len(recent_leads)}</b>\n\n"
@@ -493,31 +498,25 @@ class AdminHandler:
                 [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
             ]
             
-            try:
-                await query.edit_message_text(
-                    message,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='HTML'
-                )
-            except Exception as edit_error:
-                if "message is not modified" in str(edit_error).lower():
-                    logger.debug("Сообщение не изменилось, пропускаем обновление")
-                else:
-                    raise edit_error
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
             
         except Exception as e:
             logger.error(f"Ошибка показа лидов: {e}")
-            try:
-                await query.edit_message_text("❌ Ошибка получения данных о лидах")
-            except:
-                pass
+            await query.edit_message_text("❌ Ошибка получения данных о лидах")
 
     async def _show_channels_callback(self, query):
         """Показать каналы через callback"""
         try:
             channels = await get_active_channels()
             
-            message = "📺 <b>Каналы для парсинга</b>\n\n"
+            # Добавляем timestamp для избежания дублирования
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            message = f"📺 <b>Каналы для парсинга</b> (обновлено {timestamp})\n\n"
             
             if channels:
                 for channel in channels[:5]:  # Показываем только первые 5
@@ -547,56 +546,37 @@ class AdminHandler:
             
         except Exception as e:
             logger.error(f"Ошибка показа каналов: {e}")
-            await query.edit_message_text("❌ Ошибка получения данных")
+            await query.edit_message_text("❌ Ошибка получения данных о каналах")
 
     async def _show_stats_callback(self, query):
         """Показать статистику через callback"""
         try:
             stats = await get_stats()
             
-            message = "📊 <b>Статистика</b>\n\n"
+            # Добавляем timestamp для избежания дублирования
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            
+            message = f"📊 <b>Статистика</b> (обновлено {timestamp})\n\n"
             message += f"👥 Пользователей: {stats.get('total_users', 0)}\n"
             message += f"🔥 Заинтересованных: {stats.get('interested_users', 0)}\n"
             message += f"💬 Сообщений за 24ч: {stats.get('messages_24h', 0)}\n"
             message += f"🎯 Лидов за 24ч: {stats.get('leads_24h', 0)}\n"
             message += f"📺 Активных каналов: {stats.get('active_channels', 0)}\n"
             
-            # Добавляем timestamp для избежания дублирования
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            message += f"\n⏰ Обновлено: {timestamp}"
-            
             keyboard = [
                 [InlineKeyboardButton("🔄 Обновить", callback_data="admin_stats")],
                 [InlineKeyboardButton("🔙 Админ панель", callback_data="admin_panel")]
             ]
             
-            try:
-                await query.edit_message_text(
-                    message,
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='HTML'
-                )
-            except Exception as edit_error:
-                if "message is not modified" in str(edit_error).lower():
-                    logger.debug("Статистика не изменилась, принудительно обновляем")
-                    # Добавляем случайный символ для принудительного обновления
-                    import random
-                    message += f" {random.choice(['📈', '📉', '📊'])}"
-                    await query.edit_message_text(
-                        message,
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                        parse_mode='HTML'
-                    )
-                else:
-                    raise edit_error
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
             
         except Exception as e:
             logger.error(f"Ошибка показа статистики: {e}")
-            try:
-                await query.edit_message_text("❌ Ошибка получения статистики")
-            except:
-                pass
+            await query.edit_message_text("❌ Ошибка получения статистики")
 
     async def _show_broadcast_info(self, query):
         """Показать информацию о рассылке"""

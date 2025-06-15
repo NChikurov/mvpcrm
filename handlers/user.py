@@ -32,8 +32,11 @@ class UserHandler:
         except Exception as e:
             logger.warning(f"Не удалось инициализировать Claude клиента: {e}")
         
-        # Callback handler
-        self.callback_handler = CallbackQueryHandler(self.handle_callback)
+        # Callback handler - ВАЖНО: только для пользовательских callback
+        self.callback_handler = CallbackQueryHandler(
+            self.handle_callback,
+            pattern=r'^(main_menu|help|contact|about)$'  # Только пользовательские callback
+        )
         
         logger.info("UserHandler инициализирован")
 
@@ -270,12 +273,12 @@ class UserHandler:
         try:
             data = query.data
             
-            # Пропускаем админские callback (они начинаются с admin_)
+            # Обрабатываем только пользовательские callback
             if data.startswith('admin_'):
-                return
+                return  # Пропускаем админские
             
             await query.answer()
-            logger.info(f"Callback от пользователя {query.from_user.id}: {data}")
+            logger.info(f"User callback от пользователя {query.from_user.id}: {data}")
             
             if data == "main_menu":
                 await self._show_main_menu(query)
@@ -286,10 +289,14 @@ class UserHandler:
             elif data == "about":
                 await self._show_about(query)
             else:
-                await query.edit_message_text("Неизвестная команда")
+                logger.warning(f"Неизвестная пользовательская команда: {data}")
                 
         except Exception as e:
-            logger.error(f"Ошибка обработки callback: {e}")
+            logger.error(f"Ошибка обработки user callback: {e}")
+            try:
+                await query.edit_message_text("❌ Произошла ошибка. Попробуйте еще раз.")
+            except:
+                pass
 
     def _get_main_keyboard(self):
         """Основная клавиатура для пользователей"""
@@ -335,51 +342,85 @@ class UserHandler:
         menu_message = self.messages_config.get('menu', '📋 Главное меню:\n\nВыберите действие.')
         keyboard = self._get_main_keyboard()
         
-        await query.edit_message_text(
-            menu_message,
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
+        try:
+            await query.edit_message_text(
+                menu_message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка показа главного меню: {e}")
 
     async def _show_help(self, query):
         """Показать справку"""
-        help_message = self.messages_config.get('help', 'ℹ️ Помощь:\n\n/start - начать работу\n/help - справка\n/menu - главное меню')
+        help_message = self.messages_config.get('help', 
+            'ℹ️ <b>Помощь</b>\n\n'
+            '/start - начать работу с ботом\n'
+            '/help - показать эту справку\n'
+            '/menu - открыть главное меню\n\n'
+            'Напишите любое сообщение и я помогу вам!')
+        
         keyboard = [
             [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
         ]
         
-        await query.edit_message_text(
-            help_message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
+        try:
+            await query.edit_message_text(
+                help_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка показа справки: {e}")
 
     async def _show_contact(self, query):
         """Показать контактную информацию"""
         contact_message = self.messages_config.get('contact', 
-            '📞 Контакты:\n\n• Telegram: @support\n• Email: support@example.com')
+            '📞 <b>Контактная информация</b>\n\n'
+            '• <b>Telegram:</b> @support\n'
+            '• <b>Email:</b> support@example.com\n'
+            '• <b>Телефон:</b> +7 (999) 123-45-67\n\n'
+            'Мы работаем 24/7 и всегда готовы помочь!')
+        
         keyboard = [
             [InlineKeyboardButton("🔙 Главное меню", callback_data="main_menu")]
         ]
         
-        await query.edit_message_text(
-            contact_message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
+        try:
+            await query.edit_message_text(
+                contact_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка показа контактов: {e}")
 
     async def _show_about(self, query):
         """Показать информацию о компании"""
         about_message = """📋 <b>О нашей компании</b>
 
-Мы предоставляем качественные услуги и решения для бизнеса:
+🚀 <b>AI-CRM Solutions</b> - ведущий поставщик решений для автоматизации продаж и управления клиентами.
 
-🔹 Профессиональный подход
-🔹 Индивидуальные решения  
-🔹 Поддержка 24/7
-🔹 Гарантия качества
+<b>🔹 Наши услуги:</b>
+• Разработка CRM систем
+• Автоматизация продаж
+• Telegram боты для бизнеса
+• Интеграции с API
+• Аналитика и отчеты
 
-Свяжитесь с нами для получения консультации!"""
+<b>🔹 Преимущества:</b>
+• ✅ Профессиональный подход
+• ✅ Индивидуальные решения  
+• ✅ Поддержка 24/7
+• ✅ Гарантия качества
+• ✅ Доступные цены
+
+<b>📈 Результаты наших клиентов:</b>
+• Увеличение продаж до 40%
+• Автоматизация 80% процессов
+• Экономия времени до 60%
+
+Свяжитесь с нами для бесплатной консультации!"""
         
         keyboard = [
             [
@@ -388,8 +429,11 @@ class UserHandler:
             ]
         ]
         
-        await query.edit_message_text(
-            about_message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
+        try:
+            await query.edit_message_text(
+                about_message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            logger.error(f"Ошибка показа информации о компании: {e}")
