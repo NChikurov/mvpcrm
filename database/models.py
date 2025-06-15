@@ -1,64 +1,23 @@
 """
-Модели базы данных для AI-CRM бота
+Полные модели базы данных для AI CRM Bot
 """
 
-from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List
+from datetime import datetime
+from typing import Optional
 
 @dataclass
 class User:
     """Модель пользователя"""
-    id: Optional[int] = None
-    telegram_id: int = 0
+    telegram_id: int
     username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
-    interest_score: int = 0
-    message_count: int = 0
-    created_at: Optional[datetime] = None
+    is_admin: bool = False
+    is_active: bool = True
+    registration_date: Optional[datetime] = None
     last_activity: Optional[datetime] = None
-    is_blocked: bool = False
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-        if self.last_activity is None:
-            self.last_activity = datetime.now()
-
-@dataclass
-class Message:
-    """Модель сообщения пользователя"""
-    id: Optional[int] = None
-    user_id: int = 0
-    telegram_message_id: int = 0
-    text: str = ""
-    ai_analysis: Optional[str] = None
-    interest_score: int = 0
-    response_sent: bool = False
-    created_at: Optional[datetime] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
-
-@dataclass 
-class Lead:
-    """Модель потенциального клиента из парсинга"""
-    id: Optional[int] = None
-    telegram_id: Optional[int] = None
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-    source_channel: str = ""
-    interest_score: int = 0
-    message_text: str = ""
-    message_date: Optional[datetime] = None
-    is_contacted: bool = False
-    created_at: Optional[datetime] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
+    interaction_count: int = 0
 
 @dataclass
 class ParsedChannel:
@@ -66,28 +25,124 @@ class ParsedChannel:
     id: Optional[int] = None
     channel_username: str = ""
     channel_title: Optional[str] = None
+    channel_id: Optional[int] = None
     enabled: bool = True
-    last_message_id: Optional[int] = None
-    last_parsed: Optional[datetime] = None
-    total_messages_parsed: int = 0
-    leads_found: int = 0
     created_at: Optional[datetime] = None
+    last_message_id: Optional[int] = None
+    total_messages: int = 0
+    leads_found: int = 0
+
+@dataclass
+class Lead:
+    """Модель лида с расширенными AI данными"""
+    # Основные поля
+    id: Optional[int] = None
+    telegram_id: int = 0
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    source_channel: Optional[str] = None
+    interest_score: int = 0
+    message_text: str = ""
+    message_date: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    status: str = "new"  # new, contacted, qualified, converted, rejected
     
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
+    # AI анализ - новые поля
+    lead_quality: str = "unknown"  # hot, warm, cold, not_lead
+    interests: Optional[str] = None  # JSON строка с интересами
+    buying_signals: Optional[str] = None  # JSON строка с сигналами покупки
+    urgency_level: str = "none"  # immediate, short_term, long_term, none
+    estimated_budget: Optional[str] = None
+    timeline: Optional[str] = None
+    pain_points: Optional[str] = None  # JSON строка с болевыми точками
+    decision_stage: str = "awareness"  # awareness, consideration, decision, post_purchase
+    
+    # Дополнительные поля
+    contact_attempts: int = 0
+    last_contact_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+@dataclass 
+class AIAnalysisLog:
+    """Лог AI анализов для отслеживания"""
+    id: Optional[int] = None
+    user_id: int = 0
+    analysis_date: Optional[datetime] = None
+    confidence_score: int = 0
+    lead_quality: str = "unknown"
+    is_lead: bool = False
+    context_messages_count: int = 0
+    analysis_duration_ms: int = 0
+    ai_model_used: Optional[str] = None
+    raw_ai_response: Optional[str] = None
+
+@dataclass
+class UserInteraction:
+    """История взаимодействий с пользователем"""
+    id: Optional[int] = None
+    user_id: int = 0
+    interaction_type: str = "message"  # message, call, meeting, email
+    interaction_date: Optional[datetime] = None
+    description: str = ""
+    outcome: Optional[str] = None
+    next_action: Optional[str] = None
+    admin_id: Optional[int] = None
+
+@dataclass
+class Message:
+    """Модель сообщения (для совместимости)"""
+    id: Optional[int] = None
+    telegram_message_id: int = 0
+    user_id: int = 0
+    chat_id: int = 0
+    text: str = ""
+    created_at: Optional[datetime] = None
+    processed: bool = False
+    interest_score: Optional[int] = None
+
+@dataclass
+class AdminAction:
+    """Модель действий администратора"""
+    id: Optional[int] = None
+    admin_id: int = 0
+    action_type: str = ""  # view_leads, contact_lead, update_status, etc.
+    target_id: Optional[int] = None  # ID лида или другого объекта
+    description: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+@dataclass
+class SystemStats:
+    """Системная статистика"""
+    id: Optional[int] = None
+    stat_date: Optional[datetime] = None
+    total_users: int = 0
+    total_leads: int = 0
+    total_messages: int = 0
+    ai_analyses_count: int = 0
+    hot_leads_count: int = 0
+    warm_leads_count: int = 0
+    cold_leads_count: int = 0
+    conversion_rate: float = 0.0
 
 @dataclass
 class Setting:
-    """Модель настроек бота"""
+    """Модель настроек системы"""
+    id: Optional[int] = None
     key: str = ""
     value: str = ""
     description: Optional[str] = None
+    created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    
-    def __post_init__(self):
-        if self.updated_at is None:
-            self.updated_at = datetime.now()
+
+@dataclass
+class BotStats:
+    """Статистика бота (для совместимости)"""
+    id: Optional[int] = None
+    total_users: int = 0
+    total_messages: int = 0
+    total_leads: int = 0
+    created_at: Optional[datetime] = None
 
 @dataclass
 class Broadcast:
@@ -95,108 +150,97 @@ class Broadcast:
     id: Optional[int] = None
     admin_id: int = 0
     message_text: str = ""
-    total_users: int = 0
-    sent_count: int = 0
-    failed_count: int = 0
-    status: str = "pending"  # pending, sending, completed, failed
+    target_audience: str = "all"  # all, leads, users
+    status: str = "draft"  # draft, sending, completed, failed
     created_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    
-    def __post_init__(self):
-        if self.created_at is None:
-            self.created_at = datetime.now()
+    sent_at: Optional[datetime] = None
+    total_recipients: int = 0
+    successful_sends: int = 0
+    failed_sends: int = 0
 
-# SQL схемы для создания таблиц
-CREATE_TABLES_SQL = [
-    """
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER UNIQUE NOT NULL,
-        username TEXT,
-        first_name TEXT,
-        last_name TEXT,
-        interest_score INTEGER DEFAULT 0,
-        message_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_blocked BOOLEAN DEFAULT FALSE
-    )
-    """,
-    
-    """
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        telegram_message_id INTEGER,
-        text TEXT NOT NULL,
-        ai_analysis TEXT,
-        interest_score INTEGER DEFAULT 0,
-        response_sent BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )
-    """,
-    
-    """
-    CREATE TABLE IF NOT EXISTS leads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        telegram_id INTEGER,
-        username TEXT,
-        first_name TEXT,
-        source_channel TEXT NOT NULL,
-        interest_score INTEGER DEFAULT 0,
-        message_text TEXT NOT NULL,
-        message_date TIMESTAMP,
-        is_contacted BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """,
-    
-    """
-    CREATE TABLE IF NOT EXISTS parsed_channels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_username TEXT UNIQUE NOT NULL,
-        channel_title TEXT,
-        enabled BOOLEAN DEFAULT TRUE,
-        last_message_id INTEGER,
-        last_parsed TIMESTAMP,
-        total_messages_parsed INTEGER DEFAULT 0,
-        leads_found INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """,
-    
-    """
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        description TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """,
-    
-    """
-    CREATE TABLE IF NOT EXISTS broadcasts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        admin_id INTEGER NOT NULL,
-        message_text TEXT NOT NULL,
-        total_users INTEGER DEFAULT 0,
-        sent_count INTEGER DEFAULT 0,
-        failed_count INTEGER DEFAULT 0,
-        status TEXT DEFAULT 'pending',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        completed_at TIMESTAMP
-    )
-    """
-]
+@dataclass
+class Subscription:
+    """Модель подписки"""
+    id: Optional[int] = None
+    user_id: int = 0
+    subscription_type: str = "basic"  # basic, premium, enterprise
+    status: str = "active"  # active, inactive, expired
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    auto_renewal: bool = True
 
-# Индексы для оптимизации
-CREATE_INDEXES_SQL = [
-    "CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)",
-    "CREATE INDEX IF NOT EXISTS idx_users_interest_score ON users(interest_score)",
-    "CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id)",
-    "CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_leads_interest_score ON leads(interest_score)",
-    "CREATE INDEX IF NOT EXISTS idx_leads_source_channel ON leads(source_channel)",
-    "CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at)"
-]
+@dataclass
+class Analytics:
+    """Модель аналитики"""
+    id: Optional[int] = None
+    metric_name: str = ""
+    metric_value: float = 0.0
+    metric_date: Optional[datetime] = None
+    category: str = "general"  # general, leads, users, performance
+
+@dataclass
+class Config:
+    """Модель конфигурации"""
+    id: Optional[int] = None
+    section: str = ""
+    key: str = ""
+    value: str = ""
+    description: Optional[str] = None
+    is_sensitive: bool = False
+
+@dataclass
+class Session:
+    """Модель сессии пользователя"""
+    id: Optional[int] = None
+    user_id: int = 0
+    session_token: str = ""
+    created_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    is_active: bool = True
+
+@dataclass
+class Notification:
+    """Модель уведомления"""
+    id: Optional[int] = None
+    user_id: int = 0
+    title: str = ""
+    message: str = ""
+    notification_type: str = "info"  # info, warning, error, success
+    is_read: bool = False
+    created_at: Optional[datetime] = None
+
+@dataclass
+class Template:
+    """Модель шаблона сообщения"""
+    id: Optional[int] = None
+    name: str = ""
+    content: str = ""
+    template_type: str = "message"  # message, email, notification
+    variables: Optional[str] = None  # JSON строка с переменными
+    is_active: bool = True
+    created_at: Optional[datetime] = None
+
+@dataclass
+class Webhook:
+    """Модель вебхука"""
+    id: Optional[int] = None
+    url: str = ""
+    event_type: str = ""  # lead_created, user_registered, etc.
+    is_active: bool = True
+    secret_key: Optional[str] = None
+    last_triggered: Optional[datetime] = None
+    success_count: int = 0
+    failure_count: int = 0
+
+@dataclass
+class CREATE_INDEXES_SQL:
+    """Модель CREATE_INDEXES_SQL"""
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+
+@dataclass
+class CREATE_TABLES_SQL:
+    """Модель CREATE_TABLES_SQL"""
+    id: Optional[int] = None
+    created_at: Optional[datetime] = None
+
