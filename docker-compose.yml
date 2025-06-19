@@ -1,0 +1,153 @@
+version: '3.8'
+
+services:
+  # Основной AI-CRM бот
+  ai-crm-bot:
+    build: .
+    container_name: ai-crm-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    depends_on:
+      - redis
+    networks:
+      - ai-crm-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import aiosqlite; import asyncio; asyncio.run(aiosqlite.connect('/app/data/bot.db').close())"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Redis для кэширования (опционально)
+  redis:
+    image: redis:7-alpine
+    container_name: ai-crm-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - ai-crm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus для мониторинга (опционально)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai-crm-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - ai-crm-network
+    profiles:
+      - monitoring
+
+  # Grafana для визуализации (опционально)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai-crm-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - ai-crm-network
+    profiles:
+      - monitoring
+
+  # Webhook сервер для интеграций (опционально)
+  webhook-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.webhook
+    container_name: ai-crm-webhook
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    depends_on:
+      - ai-crm-bot
+    networks:
+      - ai-crm-network
+    profiles:
+      - integrations
+
+  # Nginx для reverse proxy (опционально)
+  nginx:
+    image: nginx:alpine
+    container_name: ai-crm-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - webhook-server
+      - grafana
+    networks:
+      - ai-crm-network
+    profiles:
+      - production
+
+networks:
+  ai-crm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+# Дополнительные настройки для разработки
+x-development: &development
+  environment:
+    - DEBUG=true
+    - LOG_LEVEL=DEBUG
+  volumes:
+    - .:/app
+    - /app/__pycache__
+    - /app/.git
+
+# Профили для различных сценариев развертывания
+# docker-compose up                          # Только основной бот
+# docker-compose --profile monitoring up    # Бот + мониторинг
+# docker-compose --profile production up    # Полная продакшн конфигурация

@@ -1,5 +1,6 @@
 """
-AI Context Parser - ИСПРАВЛЕННАЯ ВЕРСИЯ с обработкой ошибок
+Интегрированный AI Context Parser с анализом диалогов - ПОЛНАЯ ВЕРСИЯ
+Замена для myparser/ai_context_parser.py
 """
 
 import asyncio
@@ -17,9 +18,15 @@ from ai.claude_client import get_claude_client
 
 logger = logging.getLogger(__name__)
 
+# Импортируем классы из анализатора диалогов
+from .dialogue_analyzer import (
+    DialogueParticipant, DialogueMessage, DialogueContext, DialogueAnalysisResult,
+    DialogueTracker, DialogueAnalyzer, EnhancedAIContextParser
+)
+
 @dataclass
 class UserContext:
-    """Контекст пользователя для анализа"""
+    """Контекст пользователя для анализа (оригинальный)"""
     user_id: int
     username: Optional[str]
     first_name: Optional[str]
@@ -31,7 +38,7 @@ class UserContext:
 
 @dataclass
 class AIAnalysisResult:
-    """Результат AI анализа"""
+    """Результат AI анализа (оригинальный)"""
     is_lead: bool
     confidence_score: int
     lead_quality: str
@@ -45,30 +52,41 @@ class AIAnalysisResult:
     pain_points: List[str]
     decision_stage: str
 
-class AIContextParser:
-    """Интеллектуальный парсер на основе AI анализа"""
+class IntegratedAIContextParser:
+    """Интегрированный AI парсер с поддержкой анализа диалогов и индивидуальных сообщений"""
     
     def __init__(self, config):
         self.config = config
         self.parsing_config = config.get('parsing', {})
         
-        # Настройки
+        # Основные настройки
         self.enabled = self.parsing_config.get('enabled', True)
         self.channels = self._parse_channels()
         self.min_confidence_score = self.parsing_config.get('min_confidence_score', 70)
+        
+        # Настройки для индивидуального анализа
         self.context_window_hours = self.parsing_config.get('context_window_hours', 24)
         self.min_messages_for_analysis = self.parsing_config.get('min_messages_for_analysis', 1)
         self.max_context_messages = self.parsing_config.get('max_context_messages', 10)
         
-        # Контекст пользователей
+        # Настройки для анализа диалогов
+        self.dialogue_analysis_enabled = self.parsing_config.get('dialogue_analysis_enabled', True)
+        self.prefer_dialogue_analysis = self.parsing_config.get('prefer_dialogue_analysis', True)
+        
+        # Компоненты
+        self.dialogue_tracker = DialogueTracker(config) if self.dialogue_analysis_enabled else None
+        self.dialogue_analyzer = DialogueAnalyzer(config) if self.dialogue_analysis_enabled else None
+        
+        # Контекст пользователей для индивидуального анализа
         self.user_contexts: Dict[int, UserContext] = {}
         self.analysis_cache: Dict[str, AIAnalysisResult] = {}
         self.processed_leads: Dict[int, datetime] = {}
         
-        logger.info(f"AI Context Parser инициализирован:")
+        logger.info(f"IntegratedAIContextParser инициализирован:")
         logger.info(f"  - Каналов: {len(self.channels)}")
+        logger.info(f"  - Анализ диалогов: {self.dialogue_analysis_enabled}")
+        logger.info(f"  - Приоритет диалогам: {self.prefer_dialogue_analysis}")
         logger.info(f"  - Мин. уверенность: {self.min_confidence_score}%")
-        logger.info(f"  - Окно контекста: {self.context_window_hours}ч")
 
     def _parse_channels(self) -> List[str]:
         """Парсинг каналов из конфигурации"""
@@ -80,7 +98,7 @@ class AIContextParser:
         return []
 
     async def process_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Главная функция обработки сообщения с детальным логированием"""
+        """Главная функция обработки сообщения с интегрированным анализом"""
         try:
             if not self.enabled:
                 logger.info("❌ AI парсинг отключен")
@@ -94,15 +112,111 @@ class AIContextParser:
                 logger.warning("⚠️ Нет пользователя, сообщения или текста")
                 return
             
-            logger.info(f"🔍 Начинаем AI анализ сообщения:")
+            logger.info(f"🔍 Начинаем интегрированный анализ сообщения:")
             logger.info(f"    👤 Пользователь: {user.first_name} (@{user.username})")
-            logger.info(f"    💬 Текст: '{message.text}'")
+            logger.info(f"    💬 Текст: '{message.text[:50]}...'")
             logger.info(f"    📍 Канал: {chat_id}")
             
             # Проверяем, что канал отслеживается
             if not self.is_channel_monitored(chat_id, update.effective_chat.username):
                 logger.info("⏭️ Канал не отслеживается")
                 return
+            
+            # Стратегия 1: Пробуем анализ диалогов (если включен)
+            dialogue_processed = False
+            if self.dialogue_analysis_enabled and self.dialogue_tracker:
+                dialogue_id = await self.dialogue_tracker.process_message(update, context)
+                
+                if dialogue_id:
+                    logger.info(f"📝 Сообщение обработано в диалоге: {dialogue_id}")
+                    
+                    # Проверяем готовые для анализа диалоги
+                    await self._check_and_analyze_dialogues(context)
+                    dialogue_processed = True
+                    
+                    # Если настроен приоритет диалогам - не делаем индивидуальный анализ
+                    if self.prefer_dialogue_analysis:
+                        logger.info("🎯 Приоритет диалогам - пропускаем индивидуальный анализ")
+                        return
+            
+            # Стратегия 2: Индивидуальный анализ (если диалог не обработан или не приоритетен)
+            if not dialogue_processed or not self.prefer_dialogue_analysis:
+                logger.info("👤 Запускаем индивидуальный анализ пользователя")
+                await self._process_individual_message(update, context)
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка в интегрированном AI парсере: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def _check_and_analyze_dialogues(self, context: ContextTypes.DEFAULT_TYPE):
+        """Проверка и анализ готовых диалогов"""
+        if not self.dialogue_analysis_enabled or not self.dialogue_analyzer:
+            return
+        
+        try:
+            completed_dialogues = self.dialogue_tracker.get_completed_dialogues_for_analysis()
+            
+            for dialogue in completed_dialogues:
+                logger.info(f"🔍 Анализируем завершенный диалог: {dialogue.dialogue_id}")
+                
+                analysis_result = await self.dialogue_analyzer.analyze_dialogue(dialogue)
+                
+                if analysis_result and analysis_result.is_valuable_dialogue:
+                    await self._process_dialogue_analysis_result(dialogue, analysis_result, context)
+                    
+                    # Помечаем участников как обработанных в диалоге
+                    for participant_id in dialogue.participants.keys():
+                        self.processed_leads[participant_id] = datetime.now()
+                
+                # Удаляем диалог из активных после анализа
+                if dialogue.dialogue_id in self.dialogue_tracker.active_dialogues:
+                    del self.dialogue_tracker.active_dialogues[dialogue.dialogue_id]
+                
+        except Exception as e:
+            logger.error(f"Ошибка анализа диалогов: {e}")
+
+    async def _process_dialogue_analysis_result(self, dialogue: DialogueContext, 
+                                              analysis: DialogueAnalysisResult, 
+                                              context: ContextTypes.DEFAULT_TYPE):
+        """Обработка результатов анализа диалога"""
+        try:
+            logger.info(f"💎 Ценный диалог обнаружен: {dialogue.dialogue_id}")
+            logger.info(f"   Уверенность: {analysis.confidence_score}%")
+            logger.info(f"   Потенциальных лидов: {len(analysis.potential_leads)}")
+            
+            # Создаем лиды для участников с высокой вероятностью
+            created_leads = []
+            for lead_data in analysis.potential_leads:
+                if lead_data['lead_probability'] >= self.min_confidence_score:
+                    user_id = lead_data['user_id']
+                    participant = dialogue.participants.get(user_id)
+                    
+                    if participant:
+                        lead = await self._create_lead_from_dialogue_participant(
+                            participant, dialogue, lead_data, analysis
+                        )
+                        if lead:
+                            created_leads.append((participant, lead_data))
+            
+            # Отправляем уведомление админам о ценном диалоге
+            min_confidence_for_notification = self.parsing_config.get('min_dialogue_confidence', 75)
+            if (analysis.confidence_score >= min_confidence_for_notification or created_leads):
+                await self._notify_admins_about_dialogue(context, dialogue, analysis, created_leads)
+            
+            # Обновляем статистику канала
+            await self._update_channel_stats(str(dialogue.channel_id), 
+                                           dialogue.messages[-1].message_id if dialogue.messages else 0,
+                                           len(created_leads) > 0)
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки результатов анализа диалога: {e}")
+
+    async def _process_individual_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка индивидуального сообщения (оригинальная логика)"""
+        try:
+            user = update.effective_user
+            message = update.message
             
             # Обновляем контекст пользователя
             await self._update_user_context(user, message, update.effective_chat)
@@ -118,7 +232,7 @@ class AIContextParser:
             
             # Проверяем готовность к анализу
             if not self._should_analyze_user(user_context):
-                logger.info(f"⏳ Пользователь {user.id} не готов к анализу (недостаточно данных)")
+                logger.info(f"⏳ Пользователь {user.id} не готов к индивидуальному анализу")
                 return
             
             # Проверяем, не анализировали ли недавно
@@ -126,49 +240,50 @@ class AIContextParser:
                 logger.info(f"🔄 Пользователь {user.id} недавно анализировался")
                 return
             
-            logger.info("🤖 Запускаем AI анализ...")
+            logger.info("🤖 Запускаем индивидуальный AI анализ...")
             
             # Запускаем AI анализ
             analysis = await self._analyze_user_context(user_context)
             
             if analysis:
-                logger.info(f"✅ AI анализ завершен:")
+                logger.info(f"✅ Индивидуальный AI анализ завершен:")
                 logger.info(f"    🎯 Лид: {analysis.is_lead}")
                 logger.info(f"    📊 Уверенность: {analysis.confidence_score}%")
                 logger.info(f"    🔥 Качество: {analysis.lead_quality}")
                 
                 if analysis.is_lead and analysis.confidence_score >= self.min_confidence_score:
-                    logger.info("🎯 СОЗДАЕМ ЛИДА!")
+                    logger.info("🎯 СОЗДАЕМ ИНДИВИДУАЛЬНОГО ЛИДА!")
                     
                     # Создаем лид
-                    await self._create_lead_from_analysis(user_context, analysis, context)
+                    await self._create_lead_from_individual_analysis(user_context, analysis, context)
                     
                     # Запоминаем, что уже обработали
                     self.processed_leads[user.id] = datetime.now()
                     
                     # Обновляем статистику канала
-                    await self._update_channel_stats(str(chat_id), message.message_id, True)
+                    await self._update_channel_stats(str(update.effective_chat.id), 
+                                                   message.message_id, True)
                 else:
                     logger.info(f"❌ Не лид: score={analysis.confidence_score}, min={self.min_confidence_score}")
-                    await self._update_channel_stats(str(chat_id), message.message_id, False)
+                    await self._update_channel_stats(str(update.effective_chat.id), 
+                                                   message.message_id, False)
             else:
-                logger.warning("❌ AI анализ не удался")
-                await self._update_channel_stats(str(chat_id), message.message_id, False)
+                logger.warning("❌ Индивидуальный AI анализ не удался")
+                await self._update_channel_stats(str(update.effective_chat.id), 
+                                               message.message_id, False)
             
         except Exception as e:
-            logger.error(f"❌ Критическая ошибка в AI Context Parser: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"❌ Ошибка индивидуального анализа: {e}")
 
     async def _update_user_context(self, user: User, message, chat):
-        """Обновление контекста пользователя"""
+        """Обновление контекста пользователя (оригинальная логика)"""
         try:
             user_id = user.id
             current_time = datetime.now()
             
             # Создаем или обновляем контекст
             if user_id not in self.user_contexts:
-                logger.info(f"🆕 Создаем новый контекст для пользователя {user_id}")
+                logger.info(f"🆕 Создаем новый индивидуальный контекст для пользователя {user_id}")
                 self.user_contexts[user_id] = UserContext(
                     user_id=user_id,
                     username=user.username,
@@ -207,33 +322,33 @@ class AIContextParser:
             if len(user_context.messages) > self.max_context_messages:
                 user_context.messages = user_context.messages[-self.max_context_messages:]
             
-            logger.info(f"📝 Добавлено сообщение. Всего в контексте: {len(user_context.messages)}")
+            logger.info(f"📝 Добавлено сообщение в индивидуальный контекст. Всего: {len(user_context.messages)}")
             
         except Exception as e:
-            logger.error(f"Ошибка обновления контекста пользователя {user.id}: {e}")
+            logger.error(f"Ошибка обновления индивидуального контекста пользователя {user.id}: {e}")
 
     def _should_analyze_user(self, user_context: UserContext) -> bool:
-        """ИСПРАВЛЕННАЯ ЛОГИКА: Определяет, готов ли пользователь к анализу"""
+        """Определяет, готов ли пользователь к индивидуальному анализу"""
         messages_count = len(user_context.messages)
         
         # Минимальное количество сообщений
         if messages_count < self.min_messages_for_analysis:
-            logger.info(f"❌ Недостаточно сообщений: {messages_count} < {self.min_messages_for_analysis}")
+            logger.info(f"❌ Недостаточно сообщений для индивидуального анализа: {messages_count} < {self.min_messages_for_analysis}")
             return False
         
-        # НОВАЯ ЛОГИКА: Для одиночных сообщений проверяем сильные покупательские сигналы
+        # Для одиночных сообщений проверяем сильные покупательские сигналы
         if messages_count == 1:
             first_message = user_context.messages[0]['text'].lower()
             strong_signals = self._has_strong_buying_signals(first_message)
             
             if strong_signals:
-                logger.info(f"🔥 СИЛЬНЫЕ ПОКУПАТЕЛЬСКИЕ СИГНАЛЫ обнаружены - запускаем AI анализ!")
+                logger.info(f"🔥 СИЛЬНЫЕ ПОКУПАТЕЛЬСКИЕ СИГНАЛЫ в индивидуальном сообщении!")
                 return True
             
             # Если нет сильных сигналов - ждем время или еще сообщения
             time_since_last = datetime.now() - user_context.last_activity
             if time_since_last > timedelta(minutes=2):
-                logger.info(f"✅ Прошло достаточно времени для анализа одного сообщения: {time_since_last}")
+                logger.info(f"✅ Прошло достаточно времени для индивидуального анализа: {time_since_last}")
                 return True
             
             logger.info(f"⏳ Одно сообщение без сильных сигналов, ждем: {time_since_last} < 2 мин")
@@ -241,44 +356,29 @@ class AIContextParser:
         
         # Для 2+ сообщений - анализируем сразу
         if messages_count >= 2:
-            logger.info(f"✅ Достаточно сообщений для анализа: {messages_count}")
+            logger.info(f"✅ Достаточно сообщений для индивидуального анализа: {messages_count}")
             return True
         
         return False
 
     def _has_strong_buying_signals(self, text: str) -> bool:
         """Проверка на сильные покупательские сигналы в тексте"""
-        # Очень сильные сигналы покупки
         strong_signals = [
-            # Прямые намерения покупки
             'хочу купить', 'хочу заказать', 'готов купить', 'готов заказать',
             'нужно купить', 'планирую купить', 'собираюсь купить',
-            
-            # Прямые вопросы о покупке
             'сколько стоит', 'какая цена', 'какая стоимость', 'цена за',
             'стоимость услуг', 'прайс-лист', 'прайс лист', 'расценки',
-            
-            # Срочность
             'срочно нужно', 'нужно сегодня', 'нужно сейчас', 'как можно быстрее',
-            'в ближайшее время', 'когда можете сделать',
-            
-            # Конкретные услуги с намерением  
             'заказать бота', 'сделать бота', 'разработать бота', 'создать бота',
             'нужен бот', 'ищу разработчика', 'нужна crm', 'заказать crm',
             'автоматизировать бизнес', 'настроить автоматизацию',
-            
-            # Готовность к обсуждению
             'обсудить проект', 'обсудить условия', 'обсудить детали',
-            'связаться с менеджером', 'поговорить о цене', 'когда можем встретиться',
-            
-            # Бюджетные вопросы
-            'какой бюджет', 'в рамках бюджета', 'готов потратить', 'готов инвестировать'
+            'связаться с менеджером', 'поговорить о цене'
         ]
         
-        # Проверяем каждый сигнал
         for signal in strong_signals:
             if signal in text:
-                logger.info(f"🎯 Обнаружен сильный сигнал: '{signal}'")
+                logger.info(f"🎯 Обнаружен сильный индивидуальный сигнал: '{signal}'")
                 return True
         
         # Дополнительная проверка на комбинации слов
@@ -289,11 +389,10 @@ class AIContextParser:
         service_found = any(word in text for word in service_words)
         
         if buying_found and service_found:
-            logger.info(f"🎯 Обнаружена комбинация: покупательское намерение + наши услуги")
+            logger.info(f"🎯 Обнаружена комбинация в индивидуальном сообщении: покупательское намерение + наши услуги")
             return True
         
         return False
-
 
     def _was_recently_analyzed(self, user_id: int) -> bool:
         """Проверяет, не анализировался ли пользователь недавно"""
@@ -301,36 +400,36 @@ class AIContextParser:
             last_analysis = self.processed_leads[user_id]
             time_diff = datetime.now() - last_analysis
             if time_diff < timedelta(hours=self.context_window_hours):
-                logger.info(f"🔄 Недавний анализ: {time_diff} назад")
+                logger.info(f"🔄 Недавний анализ пользователя {user_id}: {time_diff} назад")
                 return True
         return False
 
     async def _analyze_user_context(self, user_context: UserContext) -> Optional[AIAnalysisResult]:
-        """AI анализ контекста пользователя"""
+        """AI анализ контекста пользователя (оригинальная логика)"""
         try:
-            logger.info("🤖 Начинаем AI анализ...")
+            logger.info("🤖 Начинаем индивидуальный AI анализ...")
             
             claude_client = get_claude_client()
             if not claude_client or not claude_client.client:
-                logger.warning("❌ Claude API недоступен, используем простой анализ")
+                logger.warning("❌ Claude API недоступен, используем простой индивидуальный анализ")
                 return self._simple_analysis(user_context)
             
             # Создаем ключ для кэша
             messages_text = " | ".join([msg['text'] for msg in user_context.messages[-5:]])
-            cache_key = f"{user_context.user_id}:{hash(messages_text)}"
+            cache_key = f"individual_{user_context.user_id}:{hash(messages_text)}"
             
             # Проверяем кэш
             if cache_key in self.analysis_cache:
-                logger.info(f"💾 Используем кэшированный анализ для {user_context.user_id}")
+                logger.info(f"💾 Используем кэшированный индивидуальный анализ для {user_context.user_id}")
                 return self.analysis_cache[cache_key]
             
             # Подготавливаем данные для анализа
             context_data = self._prepare_context_for_ai(user_context)
             
             # Формируем промпт для Claude
-            analysis_prompt = self._create_analysis_prompt(context_data)
+            analysis_prompt = self._create_individual_analysis_prompt(context_data)
             
-            logger.info(f"📤 Отправляем запрос в Claude...")
+            logger.info(f"📤 Отправляем запрос индивидуального анализа в Claude...")
             
             # Отправляем запрос в Claude с таймаутом
             try:
@@ -344,29 +443,29 @@ class AIContextParser:
                     timeout=15.0
                 )
                 
-                logger.info("📥 Получен ответ от Claude")
+                logger.info("📥 Получен ответ от Claude для индивидуального анализа")
                 
                 # Парсим ответ
-                analysis_result = self._parse_ai_response(response.content[0].text)
+                analysis_result = self._parse_individual_ai_response(response.content[0].text)
                 
                 # Кэшируем результат
                 self.analysis_cache[cache_key] = analysis_result
                 
-                logger.info(f"✅ AI анализ успешен: лид={analysis_result.is_lead}, уверенность={analysis_result.confidence_score}%")
+                logger.info(f"✅ Индивидуальный AI анализ успешен: лид={analysis_result.is_lead}, уверенность={analysis_result.confidence_score}%")
                 
                 return analysis_result
                 
             except asyncio.TimeoutError:
-                logger.warning("⏰ AI анализ превысил таймаут, используем простой анализ")
+                logger.warning("⏰ Индивидуальный AI анализ превысил таймаут, используем простой анализ")
                 return self._simple_analysis(user_context)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка AI анализа: {e}")
+            logger.error(f"❌ Ошибка индивидуального AI анализа: {e}")
             return self._simple_analysis(user_context)
 
     def _simple_analysis(self, user_context: UserContext) -> AIAnalysisResult:
         """Простой анализ без AI"""
-        logger.info("🔧 Используем простой анализ...")
+        logger.info("🔧 Используем простой индивидуальный анализ...")
         
         # Объединяем все сообщения
         all_text = " ".join([msg['text'] for msg in user_context.messages]).lower()
@@ -407,14 +506,14 @@ class AIContextParser:
             buying_signals=buying_signals,
             urgency_level="medium" if score >= 70 else "low",
             recommended_action="Связаться с клиентом" if is_lead else "Продолжить наблюдение",
-            key_insights=[f"Простой анализ дал score {score}"],
+            key_insights=[f"Простой индивидуальный анализ дал score {score}"],
             estimated_budget=None,
             timeline=None,
             pain_points=[],
             decision_stage="consideration" if is_lead else "awareness"
         )
         
-        logger.info(f"🔧 Простой анализ: score={score}, лид={is_lead}")
+        logger.info(f"🔧 Простой индивидуальный анализ: score={score}, лид={is_lead}")
         return result
 
     def _prepare_context_for_ai(self, user_context: UserContext) -> Dict[str, Any]:
@@ -434,8 +533,8 @@ class AIContextParser:
             'activity_span_hours': (user_context.last_activity - user_context.first_seen).total_seconds() / 3600
         }
 
-    def _create_analysis_prompt(self, context_data: Dict[str, Any]) -> str:
-        """Создание промпта для AI анализа"""
+    def _create_individual_analysis_prompt(self, context_data: Dict[str, Any]) -> str:
+        """Создание промпта для индивидуального AI анализа"""
         
         messages_text = "\n".join([
             f"[{msg.get('date', 'unknown')}] {msg['text']}" 
@@ -454,7 +553,7 @@ class AIContextParser:
 {messages_text}
 
 ЗАДАЧА:
-Проанализируй контекст и определи, является ли этот пользователь потенциальным клиентом для услуг:
+Проанализируй ИНДИВИДУАЛЬНЫЕ сообщения этого пользователя и определи, является ли он потенциальным клиентом для услуг:
 - CRM систем и автоматизации бизнеса
 - Разработки Telegram ботов
 - IT-консалтинга и внедрения
@@ -477,7 +576,7 @@ class AIContextParser:
 }}
 
 ОБРАТИТЕ ОСОБОЕ ВНИМАНИЕ:
-- Если в сообщении есть прямые покупательские сигналы (хочу купить, сколько стоит, нужно заказать) - это ГОРЯЧИЙ ЛИД
+- Прямые покупательские сигналы (хочу купить, сколько стоит, нужно заказать) = ГОРЯЧИЙ ЛИД
 - Одиночные сообщения с сильными сигналами должны получать высокий confidence_score (85-95)
 - Срочность в запросе повышает приоритет
 
@@ -486,32 +585,30 @@ class AIContextParser:
 - confidence_score: 90-100 = очевидный клиент, 70-89 = вероятный, 50-69 = возможный, <50 = маловероятный
 - lead_quality: hot = готов покупать, warm = изучает рынок, cold = только начинает поиск
 - urgency_level: насколько срочно нужно решение
-- buying_signals: что указывает на готовность покупать
-- pain_points: какие проблемы у клиента
 
 ВАЖНО:
-- Анализируй ВЕСЬ контекст, не отдельные сообщения
+- Анализируй ВЕСЬ контекст сообщений пользователя
 - Ищи скрытые потребности и подтекст
 - Обращай внимание на бизнес-контекст
 - Высокий confidence_score только при явных сигналах
 - Будь объективным, не завышай оценки"""
 
-    def _parse_ai_response(self, response_text: str) -> AIAnalysisResult:
-        """Парсинг ответа от AI"""
+    def _parse_individual_ai_response(self, response_text: str) -> AIAnalysisResult:
+        """Парсинг ответа от AI для индивидуального анализа"""
         try:
-            logger.info(f"📋 Парсим ответ AI: {response_text[:200]}...")
+            logger.info(f"📋 Парсим ответ индивидуального AI: {response_text[:200]}...")
             
             # Ищем JSON в ответе
             import re
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if not json_match:
-                logger.warning("❌ JSON не найден в ответе AI")
+                logger.warning("❌ JSON не найден в ответе индивидуального AI")
                 raise ValueError("JSON не найден в ответе AI")
             
             json_str = json_match.group()
             data = json.loads(json_str)
             
-            logger.info(f"✅ JSON успешно распарсен: is_lead={data.get('is_lead')}, score={data.get('confidence_score')}")
+            logger.info(f"✅ JSON индивидуального анализа успешно распарсен: is_lead={data.get('is_lead')}, score={data.get('confidence_score')}")
             
             # Валидация и создание объекта результата
             return AIAnalysisResult(
@@ -530,7 +627,7 @@ class AIContextParser:
             )
             
         except Exception as e:
-            logger.error(f"❌ Ошибка парсинга AI ответа: {e}")
+            logger.error(f"❌ Ошибка парсинга ответа индивидуального AI: {e}")
             logger.debug(f"Ответ AI: {response_text}")
             
             # Возвращаем базовый результат
@@ -549,12 +646,53 @@ class AIContextParser:
                 decision_stage='awareness'
             )
 
-    async def _create_lead_from_analysis(self, user_context: UserContext, 
-                                       analysis: AIAnalysisResult, 
-                                       context: ContextTypes.DEFAULT_TYPE):
-        """Создание лида на основе AI анализа"""
+    # Методы для работы с диалогами (делегирование к компонентам)
+    
+    async def _create_lead_from_dialogue_participant(self, participant, dialogue, lead_data, analysis):
+        """Создание лида из участника диалога"""
         try:
-            logger.info("🎯 Создаем лида из AI анализа...")
+            # Собираем все сообщения участника
+            participant_messages = [
+                msg.text for msg in dialogue.messages 
+                if msg.user_id == participant.user_id
+            ]
+            
+            lead = Lead(
+                telegram_id=participant.user_id,
+                username=participant.username,
+                first_name=participant.first_name,
+                last_name=participant.last_name,
+                source_channel=f"{dialogue.channel_title} (диалог)",
+                interest_score=lead_data['lead_probability'],
+                message_text=" | ".join(participant_messages),
+                message_date=dialogue.last_activity,
+                
+                # AI поля из анализа диалога
+                lead_quality=lead_data['lead_quality'],
+                interests=json.dumps(lead_data.get('key_signals', []), ensure_ascii=False),
+                buying_signals=json.dumps(lead_data.get('key_signals', []), ensure_ascii=False),
+                urgency_level=lead_data.get('urgency_level', 'medium'),
+                estimated_budget=analysis.group_budget_estimate,
+                timeline=analysis.estimated_timeline,
+                pain_points=json.dumps(analysis.key_insights, ensure_ascii=False),
+                decision_stage=dialogue.decision_stage,
+                notes=f"Диалог {dialogue.dialogue_id}. Роль: {lead_data.get('role_in_decision', 'участник')}. {lead_data.get('recommended_approach', '')}"
+            )
+            
+            await create_lead(lead)
+            logger.info(f"✅ Лид создан из диалога: {participant.first_name} ({participant.user_id})")
+            return lead
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания лида из диалога: {e}")
+            return None
+
+    async def _create_lead_from_individual_analysis(self, user_context: UserContext, 
+                                                  analysis: AIAnalysisResult, 
+                                                  context: ContextTypes.DEFAULT_TYPE):
+        """Создание лида на основе индивидуального AI анализа"""
+        try:
+            logger.info("🎯 Создаем индивидуального лида из AI анализа...")
             
             # Объединяем все сообщения пользователя
             all_messages = " | ".join([msg['text'] for msg in user_context.messages])
@@ -578,33 +716,34 @@ class AIContextParser:
                 estimated_budget=analysis.estimated_budget,
                 timeline=analysis.timeline,
                 pain_points=json.dumps(analysis.pain_points, ensure_ascii=False),
-                decision_stage=analysis.decision_stage
+                decision_stage=analysis.decision_stage,
+                notes="Индивидуальный анализ AI"
             )
             
             # Сохраняем в базу
             await create_lead(lead)
             
-            logger.info(f"✅ AI ЛИД СОЗДАН: {user_context.first_name} (@{user_context.username})")
+            logger.info(f"✅ ИНДИВИДУАЛЬНЫЙ AI ЛИД СОЗДАН: {user_context.first_name} (@{user_context.username})")
             logger.info(f"   Качество: {analysis.lead_quality}")
             logger.info(f"   Уверенность: {analysis.confidence_score}%")
             logger.info(f"   Интересы: {', '.join(analysis.interests)}")
             
             # Отправляем уведомление админам
-            await self._notify_admins_about_ai_lead(context, user_context, analysis)
+            await self._notify_admins_about_individual_lead(context, user_context, analysis)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка создания лида: {e}")
+            logger.error(f"❌ Ошибка создания индивидуального лида: {e}")
             import traceback
             traceback.print_exc()
 
-    async def _notify_admins_about_ai_lead(self, context: ContextTypes.DEFAULT_TYPE, 
-                                         user_context: UserContext, 
-                                         analysis: AIAnalysisResult):
-        """Уведомление админов о новом AI лиде"""
+    async def _notify_admins_about_individual_lead(self, context: ContextTypes.DEFAULT_TYPE, 
+                                                 user_context: UserContext, 
+                                                 analysis: AIAnalysisResult):
+        """Уведомление админов о новом индивидуальном AI лиде"""
         try:
             admin_ids = self.config.get('bot', {}).get('admin_ids', [])
             if not admin_ids:
-                logger.warning("❌ Нет админов для уведомления")
+                logger.warning("❌ Нет админов для уведомления об индивидуальном лиде")
                 return
             
             # Определяем приоритет и эмодзи
@@ -627,7 +766,7 @@ class AIContextParser:
             
             message = f"""{priority['emoji']} <b>{priority['text']}</b> {priority['color']}
 
-🤖 <b>AI АНАЛИЗ ЗАВЕРШЕН</b>
+👤 <b>ИНДИВИДУАЛЬНЫЙ AI АНАЛИЗ</b>
 
 👤 <b>Контакт:</b> {user_context.first_name} ({username_text})
 🆔 <b>ID:</b> <code>{user_context.user_id}</code>
@@ -670,12 +809,19 @@ class AIContextParser:
                     )
                     successful_notifications += 1
                 except Exception as e:
-                    logger.error(f"❌ Не удалось отправить уведомление админу {admin_id}: {e}")
+                    logger.error(f"❌ Не удалось отправить уведомление об индивидуальном лиде админу {admin_id}: {e}")
             
-            logger.info(f"✅ AI уведомления отправлены {successful_notifications}/{len(admin_ids)} админам")
+            logger.info(f"✅ Уведомления об индивидуальном лиде отправлены {successful_notifications}/{len(admin_ids)} админам")
             
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки AI уведомлений: {e}")
+            logger.error(f"❌ Ошибка отправки уведомлений об индивидуальном лиде: {e}")
+
+    async def _notify_admins_about_dialogue(self, context: ContextTypes.DEFAULT_TYPE,
+                                          dialogue, analysis, created_leads):
+        """Уведомление админов о ценном диалоге (делегирование)"""
+        if self.dialogue_analyzer:
+            enhanced_parser = EnhancedAIContextParser(self.config)
+            await enhanced_parser._notify_admins_about_dialogue(context, dialogue, analysis, created_leads)
 
     async def _update_channel_stats(self, channel_id: str, message_id: int, lead_found: bool):
         """Обновление статистики канала"""
@@ -705,14 +851,30 @@ class AIContextParser:
         return False
 
     def get_status(self) -> Dict[str, Any]:
-        """Получение статуса парсера"""
-        return {
+        """Получение статуса интегрированного парсера"""
+        status = {
             'enabled': self.enabled,
             'channels_count': len(self.channels),
             'channels': self.channels,
             'min_confidence_score': self.min_confidence_score,
             'context_window_hours': self.context_window_hours,
-            'active_users': len(self.user_contexts),
-            'analysis_cache_size': len(self.analysis_cache),
-            'processed_leads_count': len(self.processed_leads)
+            'individual_active_users': len(self.user_contexts),
+            'individual_analysis_cache_size': len(self.analysis_cache),
+            'individual_processed_leads_count': len(self.processed_leads),
+            'dialogue_analysis_enabled': self.dialogue_analysis_enabled,
+            'prefer_dialogue_analysis': self.prefer_dialogue_analysis
         }
+        
+        if self.dialogue_tracker:
+            status['dialogue_tracker'] = {
+                'active_dialogues': len(self.dialogue_tracker.active_dialogues),
+                'min_participants': self.dialogue_tracker.min_participants,
+                'min_messages': self.dialogue_tracker.min_messages,
+                'dialogue_timeout_minutes': self.dialogue_tracker.dialogue_timeout.total_seconds() / 60
+            }
+        
+        return status
+
+
+# Alias для обратной совместимости
+AIContextParser = IntegratedAIContextParser
