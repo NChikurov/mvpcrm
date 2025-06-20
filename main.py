@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI CRM Bot с интегрированным анализом диалогов - ОБНОВЛЕННАЯ ВЕРСИЯ
+AI CRM Bot с интегрированным анализом диалогов - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 
 import asyncio
@@ -16,18 +16,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.config_loader import load_config, print_config_summary, get_config_validation_report
 from database.operations import init_database
 from database.db_migration import migrate_database_for_ai
+from database.dialogue_db_migration import migrate_database_for_dialogues
 from handlers.user import UserHandler
 from handlers.admin import AdminHandler
-
-# Импортируем новый интегрированный парсер
-try:
-    from myparser.integrated_ai_parser import IntegratedAIContextParser
-    INTEGRATED_PARSER_AVAILABLE = True
-except ImportError:
-    # Fallback на оригинальный парсер
-    from myparser.ai_context_parser import AIContextParser as IntegratedAIContextParser
-    INTEGRATED_PARSER_AVAILABLE = False
-    logging.warning("Интегрированный парсер недоступен, используется оригинальный")
 
 # Настройка логирования
 logging.basicConfig(
@@ -126,6 +117,10 @@ class EnhancedAIBot:
         logger.info("📊 Выполняется миграция базы данных для AI...")
         await migrate_database_for_ai()
         
+        # Мигрируем базу данных для поддержки диалогов
+        logger.info("💬 Выполняется миграция базы данных для диалогов...")
+        await migrate_database_for_dialogues()
+        
         # Инициализируем базу данных
         await init_database()
         logger.info("✅ База данных инициализирована")
@@ -145,14 +140,44 @@ class EnhancedAIBot:
         logger.info("✅ Обработчики зарегистрированы")
         
         # Инициализируем AI парсер
-        if INTEGRATED_PARSER_AVAILABLE:
-            logger.info("🤖 Инициализируем ИНТЕГРИРОВАННЫЙ AI Context Parser...")
-            self.ai_parser = IntegratedAIContextParser(self.config)
-            logger.info("✅ Интегрированный AI Context Parser инициализирован")
-        else:
-            logger.info("🤖 Инициализируем оригинальный AI Context Parser...")
-            self.ai_parser = IntegratedAIContextParser(self.config)
-            logger.info("✅ AI Context Parser инициализирован")
+        await self._initialize_ai_parser()
+
+    async def _initialize_ai_parser(self):
+        """Инициализация AI парсера с fallback"""
+        try:
+            # Сначала пытаемся импортировать интегрированный парсер
+            logger.info("🤖 Попытка инициализации ИНТЕГРИРОВАННОГО AI Context Parser...")
+            
+            try:
+                from myparser import IntegratedAIContextParser
+                self.ai_parser = IntegratedAIContextParser(self.config)
+                logger.info("✅ Интегрированный AI Context Parser успешно инициализирован")
+                
+                # Сохраняем ссылку для других компонентов
+                self.app.bot_data['ai_parser'] = self.ai_parser
+                
+                return
+                
+            except ImportError as e:
+                logger.warning(f"⚠️ Интегрированный парсер недоступен: {e}")
+                logger.info("🔄 Переходим на fallback парсер...")
+            
+            # Fallback на оригинальный парсер
+            try:
+                from myparser import AIContextParser
+                self.ai_parser = AIContextParser(self.config)
+                logger.info("✅ Fallback AI Context Parser инициализирован")
+                
+                # Сохраняем ссылку для других компонентов
+                self.app.bot_data['ai_parser'] = self.ai_parser
+                
+            except ImportError as e:
+                logger.error(f"❌ Не удалось инициализировать никакой AI парсер: {e}")
+                self.ai_parser = None
+                
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка инициализации AI парсера: {e}")
+            self.ai_parser = None
 
     def register_handlers(self):
         """Регистрация обработчиков команд и сообщений"""
@@ -166,6 +191,7 @@ class EnhancedAIBot:
         # Новые команды для управления анализом диалогов
         self.app.add_handler(CommandHandler("status", self.show_parser_status))
         self.app.add_handler(CommandHandler("dialogues", self.show_active_dialogues))
+        self.app.add_handler(CommandHandler("health", self.ai_health_check))
         
         # Обработка всех текстовых сообщений
         self.app.add_handler(MessageHandler(
@@ -223,6 +249,13 @@ class EnhancedAIBot:
                 if len(status['channels']) > 5:
                     message += f"... и еще {len(status['channels']) - 5}\n"
                 
+                # Показываем режим работы
+                mode = status.get('mode', 'integrated')
+                if mode == 'fallback_individual_only':
+                    message += f"\n⚠️ <b>Режим:</b> Fallback (только индивидуальный анализ)"
+                else:
+                    message += f"\n✅ <b>Режим:</b> Полнофункциональный (диалоги + индивидуальный)"
+                
                 await update.message.reply_text(message, parse_mode='HTML')
             else:
                 await update.message.reply_text("❌ AI парсер не инициализирован")
@@ -270,11 +303,75 @@ class EnhancedAIBot:
                 
                 await update.message.reply_text(message, parse_mode='HTML')
             else:
-                await update.message.reply_text("❌ Анализ диалогов не активен")
+                await update.message.reply_text("❌ Анализ диалогов не активен или недоступен в текущем режиме")
                 
         except Exception as e:
             logger.error(f"Ошибка получения активных диалогов: {e}")
             await update.message.reply_text("❌ Ошибка получения диалогов")
+
+    async def ai_health_check(self, update, context):
+        """Проверка здоровья AI системы (только для админов)"""
+        user_id = update.effective_user.id
+        admin_ids = self.config.get('bot', {}).get('admin_ids', [])
+        
+        if user_id not in admin_ids:
+            await update.message.reply_text("❌ Эта команда доступна только администраторам")
+            return
+        
+        try:
+            from ai.claude_client import get_claude_client
+            
+            message = "🤖 <b>Проверка здоровья AI системы</b>\n\n"
+            
+            # Проверяем Claude клиента
+            claude_client = get_claude_client()
+            if claude_client:
+                claude_health = await claude_client.health_check()
+                claude_stats = claude_client.get_usage_stats()
+                
+                message += f"🧠 <b>Claude API:</b>\n"
+                message += f"• Статус: {'✅ Работает' if claude_health else '❌ Недоступен'}\n"
+                message += f"• Модель: {claude_stats['model']}\n"
+                message += f"• Режим: {claude_stats['status']}\n"
+                message += f"• Макс. токенов: {claude_stats['max_tokens']}\n\n"
+            else:
+                message += f"🧠 <b>Claude API:</b> ❌ Не инициализирован\n\n"
+            
+            # Проверяем AI парсер
+            if self.ai_parser:
+                parser_status = self.ai_parser.get_status()
+                message += f"🔍 <b>AI Парсер:</b>\n"
+                message += f"• Статус: {'✅ Активен' if parser_status['enabled'] else '❌ Отключен'}\n"
+                message += f"• Каналов: {parser_status['channels_count']}\n"
+                
+                if parser_status.get('dialogue_analysis_enabled'):
+                    dialogue_status = parser_status.get('dialogue_tracker', {})
+                    message += f"• Анализ диалогов: ✅\n"
+                    message += f"• Активных диалогов: {dialogue_status.get('active_dialogues', 0)}\n"
+                else:
+                    message += f"• Анализ диалогов: ❌\n"
+                
+                message += f"• Мин. скор: {parser_status['min_confidence_score']}%\n"
+                message += f"• Активных пользователей: {parser_status['individual_active_users']}\n"
+            else:
+                message += f"🔍 <b>AI Парсер:</b> ❌ Недоступен\n"
+            
+            # Проверяем базу данных
+            try:
+                from database.operations import get_bot_stats
+                stats = await get_bot_stats()
+                message += f"\n💾 <b>База данных:</b> ✅ Работает\n"
+                message += f"• Пользователей: {stats.get('total_users', 0)}\n"
+                message += f"• Лидов: {stats.get('total_leads', 0)}\n"
+                message += f"• Сообщений: {stats.get('total_messages', 0)}\n"
+            except Exception as e:
+                message += f"\n💾 <b>База данных:</b> ❌ Ошибка: {e}\n"
+            
+            await update.message.reply_text(message, parse_mode='HTML')
+            
+        except Exception as e:
+            logger.error(f"Ошибка проверки здоровья AI: {e}")
+            await update.message.reply_text(f"❌ Ошибка проверки: {e}")
 
     async def handle_any_message(self, update, context):
         """Универсальный обработчик сообщений с расширенным AI анализом"""
@@ -319,8 +416,8 @@ class EnhancedAIBot:
                         logger.info(f"    ✅ Совпадение по: ID {chat.id}")
                         
                         # Определяем тип анализа
-                        if (hasattr(self.ai_parser, 'dialogue_analysis_enabled') and 
-                            self.ai_parser.dialogue_analysis_enabled):
+                        parser_status = self.ai_parser.get_status()
+                        if parser_status.get('dialogue_analysis_enabled'):
                             logger.info("🤖 ОТПРАВЛЯЕМ НА ИНТЕГРИРОВАННЫЙ AI АНАЛИЗ (диалоги + индивидуальный)!")
                         else:
                             logger.info("🤖 ОТПРАВЛЯЕМ НА КЛАССИЧЕСКИЙ AI АНАЛИЗ!")
@@ -330,7 +427,7 @@ class EnhancedAIBot:
                     else:
                         logger.info("⏭️ Пропускаем: канал не отслеживается")
                 else:
-                    logger.info("⏭️ Пропускаем: AI парсинг отключен")
+                    logger.info("⏭️ Пропускаем: AI парсинг отключен или недоступен")
             
             logger.info("────────────────────────────────────────────────────────────")
             
@@ -396,14 +493,19 @@ class EnhancedAIBot:
             if self.ai_parser:
                 channels = getattr(self.ai_parser, 'channels', [])
                 if channels:
-                    dialogue_enabled = getattr(self.ai_parser, 'dialogue_analysis_enabled', False)
-                    prefer_dialogue = getattr(self.ai_parser, 'prefer_dialogue_analysis', False)
+                    status = self.ai_parser.get_status()
+                    dialogue_enabled = status.get('dialogue_analysis_enabled', False)
+                    prefer_dialogue = status.get('prefer_dialogue_analysis', False)
+                    mode = status.get('mode', 'integrated')
                     
                     logger.info(f"🤖 AI мониторинг активен для {len(channels)} каналов:")
                     for channel in channels:
                         logger.info(f"    - {channel}")
                     
-                    if dialogue_enabled:
+                    if mode == 'fallback_individual_only':
+                        logger.info("🎯 РЕЖИМ: Fallback - только индивидуальный анализ сообщений")
+                        logger.info("⚠️  Анализ диалогов недоступен")
+                    elif dialogue_enabled:
                         if prefer_dialogue:
                             logger.info("🎯 РЕЖИМ: Приоритет анализу диалогов + индивидуальные сообщения")
                         else:
@@ -415,10 +517,11 @@ class EnhancedAIBot:
                     logger.info("💡 Отправьте сообщения в отслеживаемые каналы для AI анализа")
                     logger.info("💡 Используйте /status для проверки работы парсера")
                     logger.info("💡 Используйте /dialogues для просмотра активных диалогов")
+                    logger.info("💡 Используйте /health для проверки здоровья AI системы")
                 else:
                     logger.warning("⚠️  AI парсинг активен, но каналы не настроены")
             else:
-                logger.warning("⚠️  AI парсинг отключен")
+                logger.warning("⚠️  AI парсинг отключен или недоступен")
             
             # Запускаем polling
             await self.app.updater.start_polling(
