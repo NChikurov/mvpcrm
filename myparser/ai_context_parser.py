@@ -439,44 +439,80 @@ class BuiltInDialogueTracker:
             logger.info(f"🏁 Диалог завершен: {dialogue_id} ({len(completed_dialogue.messages)} сообщений)")
 
     def should_trigger_immediate_analysis(self, dialogue_id: str, message_text: str) -> bool:
-        """НОВОЕ: Проверка триггеров немедленного анализа"""
+        """УЛУЧШЕННАЯ проверка триггеров немедленного анализа"""
         text_lower = message_text.lower()
         
-        # Сильные покупательские сигналы
-        for signal in self.immediate_analysis_triggers['strong_buying_signals']:
+        # ИСПРАВЛЕНИЕ: Расширенные триггеры
+        strong_signals = [
+            'хочу купить', 'готов заказать', 'какая цена', 'сколько стоит',
+            'нужен бот', 'заказать crm', 'срочно нужно', 'бюджет',
+            'можете сделать', 'сможете разработать', 'есть ли возможность',
+            'техническое задание', 'тз', 'проект', 'интеграция'
+        ]
+        
+        decision_phrases = [
+            'я решаю', 'мое решение', 'утверждаю', 'покупаем',
+            'директор', 'руководитель', 'владелец', 'принимаю решение'
+        ]
+        
+        # Проверяем сильные сигналы
+        for signal in strong_signals:
             if signal in text_lower:
-                logger.info(f"🔥 Триггер покупательского сигнала: '{signal}'")
+                logger.info(f"🔥 Сильный триггер: '{signal}'")
                 return True
         
-        # Фразы лиц, принимающих решения
-        for phrase in self.immediate_analysis_triggers['decision_maker_phrases']:
+        # Проверяем фразы лиц, принимающих решения
+        for phrase in decision_phrases:
             if phrase in text_lower:
                 logger.info(f"🔥 Триггер принятия решений: '{phrase}'")
                 return True
         
+        # НОВОЕ: Триггер на вопросы о цене/сроках
+        price_questions = ['сколько', 'цена', 'стоимость', 'прайс', 'тариф', 'когда']
+        if any(word in text_lower for word in price_questions) and '?' in message_text:
+            logger.info(f"🔥 Триггер ценового вопроса")
+            return True
+        
         return False
 
     def get_ready_for_analysis_dialogues(self) -> List[DialogueContext]:
-        """НОВОЕ: Диалоги готовые к анализу (не обязательно завершенные)"""
+        """ИСПРАВЛЕННАЯ логика готовности диалогов к анализу"""
         ready_dialogues = []
         current_time = datetime.now()
         
         for dialogue in self.active_dialogues.values():
-            # Готов к анализу если:
-            has_min_requirements = (
-                len(dialogue.participants) >= self.min_participants and
-                len(dialogue.messages) >= self.min_messages
-            )
+            should_analyze = False
+            reason = ""
             
+            # ИСПРАВЛЕНИЕ 1: Более агрессивные условия
+            has_min_participants = len(dialogue.participants) >= 2
+            has_min_messages = len(dialogue.messages) >= 2  # БЫЛО: 3
+            
+            # ИСПРАВЛЕНИЕ 2: Любые покупательские сигналы
             has_buying_signals = any(
                 participant.buying_signals_count > 0 
                 for participant in dialogue.participants.values()
             )
             
-            # ИСПРАВЛЕНО: Более агрессивный таймаут
-            has_timeout = current_time - dialogue.last_activity > timedelta(seconds=30)
+            # ИСПРАВЛЕНИЕ 3: Более короткий таймаут
+            time_since_activity = current_time - dialogue.last_activity
+            has_timeout = time_since_activity > timedelta(seconds=15)  # БЫЛО: 30
             
-            if has_min_requirements or has_buying_signals or has_timeout:
+            # ИСПРАВЛЕНИЕ 4: Анализ при достижении минимума
+            if has_min_participants and has_min_messages:
+                should_analyze = True
+                reason = f"мин. требования: {len(dialogue.participants)} участ., {len(dialogue.messages)} сообщ."
+            
+            elif has_buying_signals:
+                should_analyze = True
+                reason = "покупательские сигналы"
+            
+            elif has_timeout and len(dialogue.messages) >= 1:
+                should_analyze = True  
+                reason = f"таймаут: {time_since_activity.total_seconds():.0f}с"
+            
+            if should_analyze:
+                logger.info(f"🎯 Диалог {dialogue.dialogue_id} готов к анализу: {reason}")
                 ready_dialogues.append(dialogue)
         
         return ready_dialogues
@@ -1101,25 +1137,37 @@ class IntegratedAIContextParser:
             logger.error(f"Ошибка обновления контекста: {e}")
 
     def _should_analyze_user_immediately(self, user_context: UserContext) -> bool:
-        """ИСПРАВЛЕННАЯ проверка готовности к анализу"""
+        """ИСПРАВЛЕННАЯ проверка готовности к анализу - более агрессивная"""
         messages_count = len(user_context.messages)
+        
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: анализируем уже с 1 сообщения
+        if messages_count < 1:
+            logger.info(f"❌ Нет сообщений для анализа")
+            return False
+        
         last_message = user_context.messages[-1]['text'].lower() if user_context.messages else ""
         
-        # Немедленный анализ при горячих сигналах
-        if self._has_immediate_business_signals(last_message):
+        # ИСПРАВЛЕНИЕ 1: Немедленный анализ при любых деловых сигналах
+        if self._has_any_business_signals(last_message):
+            logger.info(f"🔥 ДЕЛОВЫЕ СИГНАЛЫ обнаружены - анализируем немедленно!")
             return True
         
-        # Одиночные сообщения с деловыми сигналами через 10 секунд
+        # ИСПРАВЛЕНИЕ 2: Анализируем одиночные сообщения через 5 секунд (было 2 минуты)
         if messages_count == 1:
-            if self._has_any_business_signals(last_message):
-                time_since = datetime.now() - user_context.last_activity
-                return time_since > timedelta(seconds=10)
+            time_since_last = datetime.now() - user_context.last_activity
+            if time_since_last > timedelta(seconds=5):  # БЫЛО: 120 секунд
+                logger.info(f"✅ Прошло 5+ секунд - анализируем: {time_since_last}")
+                return True
             else:
-                time_since = datetime.now() - user_context.last_activity
-                return time_since > timedelta(seconds=30)
+                logger.info(f"⏳ Ждем еще: {time_since_last.total_seconds():.1f} сек < 5 сек")
+                return False
         
-        # 2+ сообщений - анализируем немедленно
-        return messages_count >= 2
+        # ИСПРАВЛЕНИЕ 3: Для 2+ сообщений - анализируем немедленно
+        if messages_count >= 2:
+            logger.info(f"✅ Достаточно сообщений ({messages_count}) - анализируем немедленно!")
+            return True
+        
+        return False
 
     def _has_immediate_business_signals(self, text: str) -> bool:
         """Проверка горячих сигналов"""
@@ -1132,20 +1180,55 @@ class IntegratedAIContextParser:
         return any(signal in text_lower for signal in immediate_signals)
 
     def _has_any_business_signals(self, text: str) -> bool:
-        """Проверка любых деловых сигналов"""
+        """РАСШИРЕННАЯ проверка деловых сигналов"""
+        if not text:
+            return False
+            
+        # ИСПРАВЛЕНИЕ: Расширенный список сигналов
         business_signals = [
-            'купить', 'заказать', 'нужно', 'нужен', 'нужна', 'хочу', 'ищу',
-            'бот', 'crm', 'автоматизация', 'цена', 'стоимость', 'проект'
+            # Прямые намерения покупки
+            'хочу', 'нужно', 'нужен', 'нужна', 'требуется', 'ищу',
+            'купить', 'заказать', 'приобрести', 'получить', 'сделать',
+            
+            # Ценовые вопросы  
+            'цена', 'стоимость', 'сколько', 'прайс', 'тариф',
+            
+            # Наши услуги
+            'бот', 'crm', 'система', 'автоматизация', 'разработка',
+            'telegram', 'телеграм', 'интеграция', 'api',
+            
+            # Деловые фразы
+            'проект', 'задача', 'работа', 'услуги', 'консультация',
+            'обсудить', 'поговорить', 'связаться', 'контакт',
+            
+            # Вопросы
+            'как', 'что', 'где', 'можете', 'делаете', 'есть ли',
+            
+            # Срочность
+            'срочно', 'быстро', 'сегодня', 'сейчас'
         ]
+        
         text_lower = text.lower()
-        return any(signal in text_lower for signal in business_signals)
+        found_signals = [signal for signal in business_signals if signal in text_lower]
+        
+        if found_signals:
+            logger.info(f"🎯 Обнаружены деловые сигналы: {found_signals}")
+            return True
+        
+        return False
 
     def _was_recently_analyzed(self, user_id: int) -> bool:
-        """Проверка недавнего анализа"""
+        """ИСПРАВЛЕННАЯ проверка недавнего анализа - менее строгая"""
         if user_id in self.processed_leads:
             last_analysis = self.processed_leads[user_id]
             time_diff = datetime.now() - last_analysis
-            return time_diff < timedelta(hours=1)  # ИСПРАВЛЕНО: 1 час вместо 24
+            # ИСПРАВЛЕНИЕ: Уменьшаем период с 24 часов до 30 минут
+            is_recent = time_diff < timedelta(minutes=30)  # БЫЛО: hours=24
+            
+            if is_recent:
+                logger.info(f"🔄 Пользователь {user_id} анализировался {time_diff} назад")
+            
+            return is_recent
         return False
 
     async def _analyze_user_context(self, user_context: UserContext) -> Optional[AIAnalysisResult]:
