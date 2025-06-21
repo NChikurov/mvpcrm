@@ -1,17 +1,16 @@
 """
-MyParser - AI парсер каналов для поиска лидов
-Версия с поддержкой анализа диалогов
+myparser/__init__.py - ИСПРАВЛЕННАЯ версия
+Простой и надежный импорт основного парсера
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 try:
-    # Пытаемся импортировать интегрированный парсер
-    from .integrated_ai_parser import IntegratedAIContextParser
-    
-    # Основной класс для экспорта
-    AIContextParser = IntegratedAIContextParser
-    
-    # Дополнительные классы для прямого импорта
-    from .integrated_ai_parser import (
+    # Импортируем исправленный основной парсер
+    from .main_parser import (
+        UnifiedAIParser,
         DialogueTracker,
         DialogueAnalyzer,
         DialogueContext,
@@ -22,9 +21,14 @@ try:
         UserContext
     )
     
+    # Основной класс для экспорта
+    AIContextParser = UnifiedAIParser
+    IntegratedAIContextParser = UnifiedAIParser
+    
     __all__ = [
         'AIContextParser',
-        'IntegratedAIContextParser',
+        'IntegratedAIContextParser', 
+        'UnifiedAIParser',
         'DialogueTracker',
         'DialogueAnalyzer',
         'DialogueContext',
@@ -35,50 +39,63 @@ try:
         'UserContext'
     ]
     
-    import logging
-    logging.getLogger(__name__).info("✅ Интегрированный AI парсер с анализом диалогов загружен успешно")
+    logger.info("✅ Исправленный UnifiedAIParser загружен успешно")
     
 except ImportError as e:
-    # Fallback на оригинальный парсер
-    import logging
-    logging.getLogger(__name__).warning(f"⚠️ Не удалось загрузить интегрированный парсер: {e}")
-    logging.getLogger(__name__).info("🔄 Используем оригинальный AI парсер (без анализа диалогов)")
+    # Fallback на базовый парсер если основной не работает
+    logger.error(f"❌ Не удалось загрузить основной парсер: {e}")
+    logger.info("🔄 Используем минимальный fallback парсер")
     
-    from .ai_context_parser import AIContextParser, UserContext, AIAnalysisResult
-    
-    # Создаем заглушки для недостающих классов
-    class DialogueTracker:
+    # Создаем минимальный fallback парсер
+    class FallbackParser:
         def __init__(self, config):
-            pass
+            self.config = config
+            self.enabled = config.get('parsing', {}).get('enabled', False)
+            self.channels = []
+            logger.warning("⚠️ Используется минимальный fallback парсер")
+        
+        async def process_message(self, update, context):
+            logger.info("Fallback parser: сообщение проигнорировано")
+        
+        def is_channel_monitored(self, chat_id, username=None):
+            return False
+        
+        def get_status(self):
+            return {
+                'enabled': False,
+                'mode': 'fallback',
+                'error': 'Основной парсер недоступен'
+            }
+    
+    # Заглушки для остальных классов
+    class DialogueTracker:
+        def __init__(self, config): pass
     
     class DialogueAnalyzer:
-        def __init__(self, config):
-            pass
+        def __init__(self, config): pass
     
-    class DialogueContext:
-        pass
+    class DialogueContext: pass
+    class DialogueParticipant: pass
+    class DialogueMessage: pass
+    class DialogueAnalysisResult: pass
+    class UserContext: pass
+    class AIAnalysisResult: pass
     
-    class DialogueParticipant:
-        pass
-    
-    class DialogueMessage:
-        pass
-    
-    class DialogueAnalysisResult:
-        pass
-    
-    # Alias для обратной совместимости
-    IntegratedAIContextParser = AIContextParser
+    # Устанавливаем fallback как основной
+    AIContextParser = FallbackParser
+    IntegratedAIContextParser = FallbackParser
+    UnifiedAIParser = FallbackParser
     
     __all__ = [
         'AIContextParser',
         'IntegratedAIContextParser',
-        'UserContext',
-        'AIAnalysisResult',
+        'UnifiedAIParser',
         'DialogueTracker',
         'DialogueAnalyzer',
         'DialogueContext',
         'DialogueParticipant',
         'DialogueMessage',
-        'DialogueAnalysisResult'
+        'DialogueAnalysisResult',
+        'AIAnalysisResult',
+        'UserContext'
     ]
