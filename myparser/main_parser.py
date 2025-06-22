@@ -700,26 +700,28 @@ class DialogueAnalyzer:
 ДИАЛОГ:
 {chr(10).join(messages_history)}
 
-Верни JSON:
+ВАЖНО: Обязательно включи в potential_leads ВСЕХ участников с user_id!
+
+Верни ТОЛЬКО валидный JSON без дополнительного текста:
 {{
-    "is_valuable_dialogue": boolean,
-    "confidence_score": number (0-100),
-    "business_relevance_score": number (0-100),
+    "is_valuable_dialogue": true/false,
+    "confidence_score": число_0_100,
+    "business_relevance_score": число_0_100,
     "potential_leads": [
         {{
-            "user_id": number,
-            "lead_probability": number (0-100),
-            "lead_quality": "hot|warm|cold",
+            "user_id": {список_всех_user_id},
+            "lead_probability": число_0_100,
+            "lead_quality": "hot/warm/cold",
             "key_signals": ["список сигналов"],
-            "role_in_decision": "decision_maker|influencer|observer|budget_holder"
+            "role_in_decision": "decision_maker/influencer/observer/budget_holder"
         }}
     ],
-    "dialogue_summary": "краткое описание сути",
-    "key_insights": ["ключевые инсайты"],
-    "recommended_actions": ["конкретные рекомендации"],
+    "dialogue_summary": "краткое описание",
+    "key_insights": ["инсайты"],
+    "recommended_actions": ["действия"],
     "next_best_action": "следующий шаг",
-    "estimated_timeline": "временные рамки или null",
-    "group_budget_estimate": "оценка бюджета или null"
+    "estimated_timeline": "сроки или null",
+    "group_budget_estimate": "бюджет или null"
 }}"""
 
         try:
@@ -732,47 +734,66 @@ class DialogueAnalyzer:
                 ),
                 timeout=20.0
             )
-            
+      
             # Парсим ответ
             response_text = response.content[0].text
             return self._parse_ai_response(response_text, dialogue)
-            
+     
         except Exception as e:
             logger.error(f"Ошибка AI анализа: {e}")
             return self._simple_dialogue_analysis(dialogue)
 
     def _parse_ai_response(self, response_text: str, dialogue: DialogueContext) -> DialogueAnalysisResult:
-        """Парсинг AI ответа"""
+        """Парсинг AI ответа с детальным логированием"""
         try:
             import re
+            logger.info(f"🔍 RAW AI RESPONSE: {response_text[:500]}...")  # ДОБАВИТЬ
+            
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if not json_match:
+                logger.error("❌ JSON не найден в AI ответе")  # ДОБАВИТЬ
                 raise ValueError("JSON не найден")
             
-            data = json.loads(json_match.group())
+            json_text = json_match.group()
+            logger.info(f"📄 EXTRACTED JSON: {json_text[:200]}...")  # ДОБАВИТЬ
+            
+            data = json.loads(json_text)
+            logger.info(f"✅ PARSED DATA: {data}")  # ДОБАВИТЬ
             
             # ИСПРАВЛЕНИЕ: Правильно обрабатываем анализ участников
             participant_analysis = {}
-            for lead_data in data.get('potential_leads', []):
-                user_id = lead_data['user_id']
-                
+            potential_leads = data.get('potential_leads', [])
+            
+            logger.info(f"👥 POTENTIAL LEADS FROM AI: {potential_leads}")  # ДОБАВИТЬ
+            
+            for lead_data in potential_leads:
+                user_id = lead_data.get('user_id')
+                if not user_id:
+                    logger.warning(f"⚠️ Пропущен lead без user_id: {lead_data}")
+                    continue
+                    
                 # Обновляем данные участника
                 if user_id in dialogue.participants:
                     participant = dialogue.participants[user_id]
-                    participant.lead_probability = lead_data.get('lead_probability', 0) / 100.0
+                    lead_prob = lead_data.get('lead_probability', 0)
+                    participant.lead_probability = lead_prob / 100.0
                     
                     participant_analysis[user_id] = {
-                        'lead_probability': lead_data.get('lead_probability', 0),
+                        'lead_probability': lead_prob,
                         'lead_quality': lead_data.get('lead_quality', 'cold'),
                         'key_signals': lead_data.get('key_signals', []),
                         'role_in_decision': lead_data.get('role_in_decision', 'observer')
                     }
+                    
+                    logger.info(f"✅ Участник {user_id} обновлен: {lead_prob}% ({lead_data.get('role_in_decision')})")
+                else:
+                    logger.warning(f"⚠️ User {user_id} не найден среди участников диалога")
             
-            return DialogueAnalysisResult(
+            result = DialogueAnalysisResult(
                 dialogue_id=dialogue.dialogue_id,
                 is_valuable_dialogue=data.get('is_valuable_dialogue', False),
                 confidence_score=data.get('confidence_score', 0),
-                potential_leads=data.get('potential_leads', []),
+                potential_leads=potential_leads,
                 business_relevance_score=data.get('business_relevance_score', 0),
                 dialogue_summary=data.get('dialogue_summary', ''),
                 key_insights=data.get('key_insights', []),
@@ -783,39 +804,90 @@ class DialogueAnalyzer:
                 participant_analysis=participant_analysis
             )
             
+            logger.info(f"🎯 FINAL ANALYSIS RESULT: valuable={result.is_valuable_dialogue}, leads_count={len(result.potential_leads)}")
+            return result
+            
         except Exception as e:
-            logger.error(f"Ошибка парсинга AI ответа: {e}")
+            logger.error(f"❌ Ошибка парсинга AI ответа: {e}")
+            logger.error(f"📄 Проблемный текст: {response_text[:200]}...")
             return self._simple_dialogue_analysis(dialogue)
 
     def _simple_dialogue_analysis(self, dialogue: DialogueContext) -> DialogueAnalysisResult:
-        """Упрощенный анализ без AI"""
+        """Усиленный упрощенный анализ без AI"""
         potential_leads = []
         participant_analysis = {}
         
+        logger.info("🔧 Используем простой анализ диалога")
+        
         for user_id, participant in dialogue.participants.items():
-            # Вычисляем скор участника
-            score = min(100, participant.buying_signals_count * 30 + participant.message_count * 10)
+            # Анализируем сообщения участника
+            user_messages = [msg for msg in dialogue.messages if msg.user_id == user_id]
             
-            if score >= 50:
-                lead_quality = "hot" if score >= 80 else "warm"
+            # Считаем покупательские сигналы
+            buying_signals = 0
+            strong_signals = []
+            
+            for msg in user_messages:
+                text_lower = msg.text.lower()
                 
-                # ИСПРАВЛЕНИЕ: Обновляем вероятность участника
-                participant.lead_probability = score / 100.0
+                # Сильные покупательские сигналы
+                if any(signal in text_lower for signal in ['хочу купить', 'готов заказать', 'нужно купить']):
+                    buying_signals += 3
+                    strong_signals.append('direct_purchase_intent')
                 
+                # Ценовые запросы
+                if any(signal in text_lower for signal in ['какая цена', 'сколько стоит', 'бюджет']):
+                    buying_signals += 2
+                    strong_signals.append('price_inquiry')
+                
+                # Технические запросы
+                if any(signal in text_lower for signal in ['интеграция', 'тг-бот', 'приложением']):
+                    buying_signals += 1
+                    strong_signals.append('technical_interest')
+            
+            # Вычисляем итоговый скор
+            message_count_factor = min(participant.message_count * 10, 30)
+            buying_signals_factor = min(buying_signals * 20, 60)
+            
+            score = message_count_factor + buying_signals_factor
+            
+            # Определяем роль
+            if buying_signals >= 3:
+                role = 'decision_maker'
+                quality = 'hot'
+            elif buying_signals >= 2:
+                role = 'interested_participant'
+                quality = 'warm'
+            elif buying_signals >= 1:
+                role = 'inquirer'
+                quality = 'cold'
+            else:
+                role = 'observer'
+                quality = 'cold'
+                score = max(score, 20)  # Минимум 20% для участников диалога
+            
+            # ИСПРАВЛЕНИЕ: Обновляем вероятность участника
+            participant.lead_probability = score / 100.0
+            
+            if score >= 40:  # Понижаем порог для простого анализа
                 potential_leads.append({
                     'user_id': user_id,
                     'lead_probability': score,
-                    'lead_quality': lead_quality,
-                    'key_signals': [f"Покупательские сигналы: {participant.buying_signals_count}"],
-                    'role_in_decision': participant.role
+                    'lead_quality': quality,
+                    'key_signals': strong_signals,
+                    'role_in_decision': role
                 })
                 
                 participant_analysis[user_id] = {
                     'lead_probability': score,
-                    'lead_quality': lead_quality,
-                    'key_signals': [f"Сигналы: {participant.buying_signals_count}"],
-                    'role_in_decision': participant.role
+                    'lead_quality': quality,
+                    'key_signals': strong_signals,
+                    'role_in_decision': role
                 }
+                
+                logger.info(f"✅ ПРОСТОЙ АНАЛИЗ - Участник {participant.display_name}: {score}% ({role})")
+        
+        logger.info(f"🎯 ПРОСТОЙ АНАЛИЗ ЗАВЕРШЕН: найдено {len(potential_leads)} лидов")
         
         return DialogueAnalysisResult(
             dialogue_id=dialogue.dialogue_id,
@@ -827,11 +899,10 @@ class DialogueAnalyzer:
             key_insights=[f"Обнаружено {len(potential_leads)} потенциальных лидов"],
             recommended_actions=["Связаться с потенциальными лидами"],
             next_best_action="Связаться с лидами",
-            estimated_timeline="1-2 недели",
-            group_budget_estimate="не определен",
+            estimated_timeline="1-2 недели", 
+            group_budget_estimate="требует уточнения",
             participant_analysis=participant_analysis
         )
-
 # === ГЛАВНЫЙ ПАРСЕР С УМНЫМ АНАЛИЗОМ ===
 
 class UnifiedAIParser:
@@ -1247,27 +1318,34 @@ class UnifiedAIParser:
                                         dialogue: DialogueContext, 
                                         analysis: DialogueAnalysisResult,
                                         created_leads: List[Tuple]):
-        """Уведомляем админов о ценном диалоге"""
+        """ИСПРАВЛЕННОЕ уведомление админов о ценном диалоге"""
         try:
-            # Формируем список участников с правильными процентами
             participants_info = []
             
-            # Сначала обрабатываем участников с созданными лидами (высокие проценты)
-            for participant, lead_data in created_leads:
-                lead_probability = lead_data.get('lead_probability', 0)
-                role = lead_data.get('role_in_decision', 'participant')
-                
-                participants_info.append(
-                    f"👤 {participant.display_name} (@{participant.username or 'no_username'}) - "
-                    f"{lead_probability}% ({role})"
-                )
+            logger.info(f"📊 ФОРМИРУЕМ УВЕДОМЛЕНИЕ:")
+            logger.info(f"  - created_leads: {len(created_leads)}")
+            logger.info(f"  - analysis.potential_leads: {len(analysis.potential_leads)}")
+            logger.info(f"  - participant_analysis: {len(analysis.participant_analysis)}")
             
-            # Затем добавляем остальных участников из анализа
-            processed_user_ids = {participant.user_id for participant, _ in created_leads}
+            # ИСПРАВЛЕНИЕ: Используем participant_analysis вместо potential_leads
+            if analysis.participant_analysis:
+                for user_id, analysis_data in analysis.participant_analysis.items():
+                    participant = dialogue.participants.get(user_id)
+                    if participant:
+                        lead_probability = analysis_data.get('lead_probability', 0)
+                        role = analysis_data.get('role_in_decision', 'observer')
+                        
+                        participants_info.append(
+                            f"👤 {participant.display_name} (@{participant.username or 'no_username'}) - "
+                            f"{lead_probability}% ({role})"
+                        )
+                        
+                        logger.info(f"✅ Добавлен участник из analysis: {participant.display_name} - {lead_probability}%")
             
-            for lead_data in analysis.potential_leads:
-                user_id = lead_data['user_id']
-                if user_id not in processed_user_ids:
+            # Если нет данных из анализа, используем potential_leads
+            elif analysis.potential_leads:
+                for lead_data in analysis.potential_leads:
+                    user_id = lead_data.get('user_id')
                     participant = dialogue.participants.get(user_id)
                     if participant:
                         lead_probability = lead_data.get('lead_probability', 0)
@@ -1277,9 +1355,12 @@ class UnifiedAIParser:
                             f"👤 {participant.display_name} (@{participant.username or 'no_username'}) - "
                             f"{lead_probability}% ({role})"
                         )
+                        
+                        logger.info(f"✅ Добавлен участник из potential_leads: {participant.display_name} - {lead_probability}%")
             
-            # Если нет участников из анализа, берем всех из диалога
-            if not participants_info:
+            # ТОЛЬКО ЕСЛИ НЕТ НИКАКИХ ДАННЫХ - fallback на 0%
+            else:
+                logger.warning("⚠️ НЕТ ДАННЫХ АНАЛИЗА - используем fallback")
                 for user_id, participant in dialogue.participants.items():
                     participants_info.append(
                         f"👤 {participant.display_name} (@{participant.username or 'no_username'}) - "
@@ -1359,54 +1440,6 @@ class UnifiedAIParser:
             
         except Exception as e:
             logger.error(f"❌ Ошибка уведомления админов о диалоге: {e}")
-
-    async def _analyze_individual_message(self, participant: ParticipantInfo, 
-                                        message: MessageInfo, 
-                                        context: ContextTypes.DEFAULT_TYPE):
-        """Анализ отдельного сообщения с проверкой ультра-триггеров"""
-        try:
-            # Проверяем ультра-триггеры для немедленного уведомления
-            has_ultra_trigger = self._check_ultra_strong_triggers(message.text)
-            
-            if has_ultra_trigger:
-                logger.info(f"🔥🔥 УЛЬТРА-ТРИГГЕР в individual сообщении!")
-                
-                # Создаем лид для ультра-триггера
-                lead_data = {
-                    'user_id': participant.user_id,
-                    'lead_probability': 90,  # Высокая вероятность для ультра-триггеров
-                    'participant_role': 'client',
-                    'buying_signals': [message.text],
-                    'urgency_level': 'high'
-                }
-                
-                # Создаем лид в базе
-                lead = await self._create_individual_lead(participant, message, None)
-                
-                # Отправляем СРОЧНОЕ уведомление админу
-                await self._notify_admins_about_individual_ultra_trigger(
-                    context, participant, message, lead_data
-                )
-                
-                logger.info(f"🚨 СРОЧНОЕ уведомление отправлено для ультра-триггера!")
-                return
-            
-            # Обычная логика для individual сообщений
-            # Проверяем есть ли сильные бизнес-сигналы
-            has_business_signals = self._contains_business_signals(message.text)
-            
-            if has_business_signals:
-                logger.info(f"🔥 Сильные бизнес-сигналы - создаем лид")
-                
-                # Создаем лид для обычных бизнес-сигналов (без уведомления)
-                lead = await self._create_individual_lead(participant, message, None)
-                if lead:
-                    logger.info(f"✅ Индивидуальный лид создан: {participant.display_name}")
-            else:
-                logger.info(f"📱 Обычное individual сообщение - пропускаем")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка анализа individual сообщения: {e}")
 
     async def _notify_admins_about_individual_ultra_trigger(self, context: ContextTypes.DEFAULT_TYPE,
                                                         participant: ParticipantInfo,
