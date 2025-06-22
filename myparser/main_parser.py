@@ -734,11 +734,11 @@ class DialogueAnalyzer:
                 ),
                 timeout=20.0
             )
-            
+      
             # Парсим ответ
             response_text = response.content[0].text
             return self._parse_ai_response(response_text, dialogue)
-            
+     
         except Exception as e:
             logger.error(f"Ошибка AI анализа: {e}")
             return self._simple_dialogue_analysis(dialogue)
