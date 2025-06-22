@@ -673,10 +673,13 @@ class DialogueAnalyzer:
             return self._simple_dialogue_analysis(dialogue)
 
     async def _ai_dialogue_analysis(self, dialogue: DialogueContext) -> DialogueAnalysisResult:
-        """AI анализ диалога"""
+        """AI анализ диалога - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         # Подготавливаем данные для анализа
         participants_info = []
+        user_ids = []  # ИСПРАВЛЕНИЕ: создаем список user_id
+        
         for user_id, participant in dialogue.participants.items():
+            user_ids.append(user_id)  # ИСПРАВЛЕНИЕ: добавляем в список
             info = f"Участник {participant.first_name} (@{participant.username or 'без_username'}): {participant.message_count} сообщений, {participant.buying_signals_count} покупательских сигналов"
             participants_info.append(info)
         
@@ -700,7 +703,7 @@ class DialogueAnalyzer:
 ДИАЛОГ:
 {chr(10).join(messages_history)}
 
-ВАЖНО: Обязательно включи в potential_leads ВСЕХ участников с user_id!
+ВАЖНО: Обязательно включи в potential_leads ВСЕХ участников с их реальными user_id: {user_ids}
 
 Верни ТОЛЬКО валидный JSON без дополнительного текста:
 {{
@@ -709,7 +712,7 @@ class DialogueAnalyzer:
     "business_relevance_score": число_0_100,
     "potential_leads": [
         {{
-            "user_id": {список_всех_user_id},
+            "user_id": конкретный_user_id_из_списка,
             "lead_probability": число_0_100,
             "lead_quality": "hot/warm/cold",
             "key_signals": ["список сигналов"],
@@ -813,11 +816,11 @@ class DialogueAnalyzer:
             return self._simple_dialogue_analysis(dialogue)
 
     def _simple_dialogue_analysis(self, dialogue: DialogueContext) -> DialogueAnalysisResult:
-        """Усиленный упрощенный анализ без AI"""
+        """Усиленный упрощенный анализ без AI - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         potential_leads = []
         participant_analysis = {}
         
-        logger.info("🔧 Используем простой анализ диалога")
+        logger.info("🔧 Используем УЛУЧШЕННЫЙ простой анализ диалога")
         
         for user_id, participant in dialogue.participants.items():
             # Анализируем сообщения участника
@@ -830,46 +833,59 @@ class DialogueAnalyzer:
             for msg in user_messages:
                 text_lower = msg.text.lower()
                 
-                # Сильные покупательские сигналы
+                # УЛЬТРА-СИЛЬНЫЕ сигналы
                 if any(signal in text_lower for signal in ['хочу купить', 'готов заказать', 'нужно купить']):
-                    buying_signals += 3
+                    buying_signals += 5  # УВЕЛИЧИЛИ вес
                     strong_signals.append('direct_purchase_intent')
                 
+                # Бюджетные запросы
+                if any(signal in text_lower for signal in ['какой бюджет', 'сколько стоит', 'бюджет']):
+                    buying_signals += 4  # УВЕЛИЧИЛИ вес
+                    strong_signals.append('budget_inquiry')
+                
                 # Ценовые запросы
-                if any(signal in text_lower for signal in ['какая цена', 'сколько стоит', 'бюджет']):
-                    buying_signals += 2
+                if any(signal in text_lower for signal in ['цена', 'стоимость']):
+                    buying_signals += 3
                     strong_signals.append('price_inquiry')
                 
                 # Технические запросы
                 if any(signal in text_lower for signal in ['интеграция', 'тг-бот', 'приложением']):
-                    buying_signals += 1
+                    buying_signals += 2
                     strong_signals.append('technical_interest')
             
             # Вычисляем итоговый скор
-            message_count_factor = min(participant.message_count * 10, 30)
-            buying_signals_factor = min(buying_signals * 20, 60)
+            message_count_factor = min(participant.message_count * 15, 35)  # УВЕЛИЧИЛИ вес
+            buying_signals_factor = min(buying_signals * 15, 70)  # УВЕЛИЧИЛИ вес
             
             score = message_count_factor + buying_signals_factor
             
-            # Определяем роль
-            if buying_signals >= 3:
+            # Определяем роль с учетом контекста сообщений
+            if buying_signals >= 5:
                 role = 'decision_maker'
                 quality = 'hot'
+                score = max(score, 85)  # Минимум для прямых намерений
+            elif any('бюджет' in msg.text.lower() for msg in user_messages):
+                role = 'budget_holder'
+                quality = 'warm'
+                score = max(score, 70)  # Минимум для бюджетных вопросов
             elif buying_signals >= 2:
                 role = 'interested_participant'
                 quality = 'warm'
+                score = max(score, 60)
             elif buying_signals >= 1:
                 role = 'inquirer'
                 quality = 'cold'
+                score = max(score, 40)
             else:
                 role = 'observer'
                 quality = 'cold'
-                score = max(score, 20)  # Минимум 20% для участников диалога
+                score = max(score, 25)  # Минимум для участников диалога
             
-            # ИСПРАВЛЕНИЕ: Обновляем вероятность участника
+            # Обновляем вероятность участника
             participant.lead_probability = score / 100.0
             
-            if score >= 40:  # Понижаем порог для простого анализа
+            # ИСПРАВЛЕНИЕ: создаем лидов для ВСЕХ участников выше порога
+            if score >= 35:  # ПОНИЗИЛИ порог с 40 до 35
                 potential_leads.append({
                     'user_id': user_id,
                     'lead_probability': score,
@@ -885,22 +901,22 @@ class DialogueAnalyzer:
                     'role_in_decision': role
                 }
                 
-                logger.info(f"✅ ПРОСТОЙ АНАЛИЗ - Участник {participant.display_name}: {score}% ({role})")
+                logger.info(f"✅ УЛУЧШЕННЫЙ АНАЛИЗ - Участник {participant.display_name}: {score}% ({role})")
         
-        logger.info(f"🎯 ПРОСТОЙ АНАЛИЗ ЗАВЕРШЕН: найдено {len(potential_leads)} лидов")
+        logger.info(f"🎯 УЛУЧШЕННЫЙ АНАЛИЗ ЗАВЕРШЕН: найдено {len(potential_leads)} лидов")
         
         return DialogueAnalysisResult(
             dialogue_id=dialogue.dialogue_id,
             is_valuable_dialogue=len(potential_leads) > 0,
-            confidence_score=75 if potential_leads else 30,
+            confidence_score=85 if any(lead['lead_probability'] >= 70 for lead in potential_leads) else 65,
             potential_leads=potential_leads,
-            business_relevance_score=80 if dialogue.is_business_related else 20,
+            business_relevance_score=90 if dialogue.is_business_related else 30,
             dialogue_summary=f"Диалог с {len(dialogue.participants)} участниками в {dialogue.channel_title}",
-            key_insights=[f"Обнаружено {len(potential_leads)} потенциальных лидов"],
-            recommended_actions=["Связаться с потенциальными лидами"],
-            next_best_action="Связаться с лидами",
-            estimated_timeline="1-2 недели", 
-            group_budget_estimate="требует уточнения",
+            key_insights=[f"Обнаружено {len(potential_leads)} потенциальных лидов", "Выявлены прямые покупательские намерения"],
+            recommended_actions=["Немедленно связаться с decision_maker", "Уточнить бюджет и требования"],
+            next_best_action="Связаться с главным лидом в течение 15 минут",
+            estimated_timeline="немедленно", 
+            group_budget_estimate="требует уточнения у decision_maker",
             participant_analysis=participant_analysis
         )
 # === ГЛАВНЫЙ ПАРСЕР С УМНЫМ АНАЛИЗОМ ===
@@ -1022,6 +1038,45 @@ class UnifiedAIParser:
             
         except Exception as e:
             logger.error(f"Ошибка обработки индивидуального сообщения: {e}")
+
+    async def _analyze_individual_message(self, participant: ParticipantInfo, message: MessageInfo, context: ContextTypes.DEFAULT_TYPE):
+        """Анализ индивидуального сообщения"""
+        try:
+            # Проверяем ультра-сильные триггеры
+            if self._check_ultra_strong_triggers(message.text):
+                logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер в индивидуальном сообщении от {participant.display_name}")
+                
+                # Создаем лид немедленно
+                lead_data = {
+                    'lead_probability': 95,
+                    'lead_quality': 'hot',
+                    'key_signals': ['direct_purchase_intent'],
+                    'participant_role': 'client'
+                }
+                
+                lead = await self._create_individual_lead(participant, message, lead_data)
+                if lead:
+                    # Отправляем срочное уведомление
+                    await self._notify_admins_about_individual_ultra_trigger(context, participant, message, lead_data)
+                
+                return
+            
+            # Обычный анализ индивидуального сообщения
+            if self._contains_business_signals(message.text):
+                logger.info(f"💼 Бизнес-сигналы в сообщении от {participant.display_name}")
+                
+                lead_data = {
+                    'lead_probability': 70,
+                    'lead_quality': 'warm',
+                    'key_signals': ['business_interest'],
+                    'participant_role': 'prospect'
+                }
+                
+                await self._create_individual_lead(participant, message, lead_data)
+            
+        except Exception as e:
+            logger.error(f"Ошибка анализа индивидуального сообщения: {e}")
+
 
     # ИСПРАВЛЕНИЕ: Добавляем недостающий метод
     def _contains_business_signals(self, text: str) -> bool:
@@ -1564,6 +1619,63 @@ class UnifiedAIParser:
                     return True
         
         return False
+
+    async def _notify_admins_about_individual_ultra_trigger(self, context: ContextTypes.DEFAULT_TYPE,
+                                                        participant: ParticipantInfo,
+                                                        message: MessageInfo,
+                                                        lead_data: dict):
+        """Уведомление админов об индивидуальном сообщении с ультра-триггером"""
+        try:
+            # Получаем название канала
+            try:
+                chat = await context.bot.get_chat(message.channel_id)
+                channel_name = chat.title or f"ID: {message.channel_id}"
+            except:
+                channel_name = f"ID: {message.channel_id}"
+            
+            # Формируем сообщение
+            timestamp = message.timestamp.strftime("%H:%M")
+            
+            message_text = f"""🚨 СРОЧНО: ГОТОВ КУПИТЬ!
+
+🤖 УЛЬТРА-СИЛЬНЫЙ ПОКУПАТЕЛЬСКИЙ СИГНАЛ
+📺 Канал: {channel_name}
+🕐 Время: {timestamp}
+👤 От: {participant.display_name} (@{participant.username or 'no_username'})
+💬 Сообщение: "{message.text}"
+
+📊 Уверенность: 95% (ультра-триггер)
+🏢 Бизнес-релевантность: 95%
+
+🎯 СРОЧНЫЕ действия:
+- Немедленно связаться с клиентом
+- Уточнить бюджет и требования  
+- Подготовить коммерческое предложение
+- Запросить контактные данные
+
+⚡️ НЕМЕДЛЕННО: Позвонить клиенту в течение 15 минут
+💰 Потенциальный бюджет: требует уточнения
+📅 Временные рамки: срочно (клиент готов)
+
+🚨 ЭТО ГОТОВЫЙ ПОКУПАТЕЛЬ - РЕАГИРУЙТЕ МГНОВЕННО!"""
+
+            # Отправляем всем админам
+            admin_ids = self.config.get('bot', {}).get('admin_ids', [])
+            
+            for admin_id in admin_ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_id,
+                        text=message_text,
+                        parse_mode=None
+                    )
+                    logger.info(f"🚨 СРОЧНОЕ уведомление отправлено админу {admin_id}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки СРОЧНОГО уведомления админу {admin_id}: {e}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка СРОЧНОГО уведомления админов: {e}")
+
 
     def get_status(self) -> Dict[str, Any]:
         """Статус парсера"""
