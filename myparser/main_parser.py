@@ -1,6 +1,6 @@
 """
 myparser/main_parser.py - ПОЛНОСТЬЮ ИСПРАВЛЕННЫЙ AI парсер
-Умный анализ диалогов без дублирования
+Умный анализ диалогов без дублирования - ИСПРАВЛЕНЫ ВСЕ ОШИБКИ
 """
 
 import asyncio
@@ -35,6 +35,11 @@ class DialogueParticipant:
     buying_signals_count: int = 0
     influence_score: int = 0
     lead_probability: float = 0.0
+
+    @property
+    def display_name(self) -> str:
+        """Отображаемое имя участника"""
+        return self.first_name or f"User_{self.user_id}"
 
 @dataclass
 class DialogueMessage:
@@ -120,6 +125,27 @@ class MessageWindow:
     has_replies: bool
     has_business_signals: bool
     conversation_type: str  # "individual", "dialogue", "group_chat"
+
+# ИСПРАВЛЕНИЕ: Добавляем недостающие классы
+@dataclass
+class ParticipantInfo:
+    """Информация об участнике для анализа"""
+    user_id: int
+    username: Optional[str]
+    first_name: Optional[str]
+    last_name: Optional[str]
+    
+    @property
+    def display_name(self) -> str:
+        return self.first_name or f"User_{self.user_id}"
+
+@dataclass
+class MessageInfo:
+    """Информация о сообщении для анализа"""
+    text: str
+    timestamp: datetime
+    channel_id: int
+    user_id: int
 
 # === УМНЫЙ ТРЕКЕР ДИАЛОГОВ ===
 
@@ -833,17 +859,12 @@ class UnifiedAIParser:
         self.dialogue_analysis_history: Dict[str, List[datetime]] = {}
         self.analysis_cooldown = timedelta(seconds=30)  # Короткий cooldown для сильных триггеров
 
-        # Контроль анализов - гибкая система
-        self.dialogue_analysis_history: Dict[str, List[datetime]] = {}
-        self.analysis_cooldown = timedelta(seconds=30)  # Базовый cooldown
-        
         logger.info(f"UnifiedAIParser инициализирован:")
         logger.info(f"  - Каналов: {len(self.channels)}")
         logger.info(f"  - Умный анализ диалогов: {self.dialogue_analysis_enabled}")
         logger.info(f"  - Мин. уверенность: {self.min_confidence_score}%")
         logger.info(f"  - Строгие критерии уведомлений: confidence≥70%, business≥75%, leads≥60%")
         logger.info(f"  - Ультра-умная система cooldown с исключениями")
-
 
     def _parse_channels(self) -> List[str]:
         """Парсинг каналов"""
@@ -902,6 +923,80 @@ class UnifiedAIParser:
             
         except Exception as e:
             logger.error(f"❌ Ошибка в исправленном парсере: {e}")
+
+    # ИСПРАВЛЕНИЕ: Добавляем недостающий метод
+    async def _process_individual_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка индивидуального сообщения"""
+        try:
+            user = update.effective_user
+            message = update.message
+            
+            # Создаем объекты для анализа
+            participant = ParticipantInfo(
+                user_id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name
+            )
+            
+            message_info = MessageInfo(
+                text=message.text,
+                timestamp=datetime.now(),
+                channel_id=update.effective_chat.id,
+                user_id=user.id
+            )
+            
+            # Анализируем сообщение
+            await self._analyze_individual_message(participant, message_info, context)
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки индивидуального сообщения: {e}")
+
+    # ИСПРАВЛЕНИЕ: Добавляем недостающий метод
+    def _contains_business_signals(self, text: str) -> bool:
+        """Проверка наличия бизнес-сигналов в тексте"""
+        business_signals = [
+            'хочу купить', 'готов заказать', 'какая цена', 'сколько стоит',
+            'нужен бот', 'заказать crm', 'срочно нужно', 'бюджет',
+            'покупаем', 'планируем купить', 'рассматриваем покупку',
+            'crm система', 'автоматизация', 'интеграция'
+        ]
+        
+        text_lower = text.lower()
+        return any(signal in text_lower for signal in business_signals)
+
+    # ИСПРАВЛЕНИЕ: Добавляем недостающий метод
+    async def _create_individual_lead(self, participant: ParticipantInfo, message: MessageInfo, analysis_result) -> Optional[Lead]:
+        """Создание индивидуального лида"""
+        try:
+            # Простой анализ для определения скора
+            score = 50  # Базовый скор
+            if self._contains_business_signals(message.text):
+                score += 30
+            if self._check_ultra_strong_triggers(message.text):
+                score = 90
+            
+            lead = Lead(
+                telegram_id=participant.user_id,
+                username=participant.username,
+                first_name=participant.first_name,
+                last_name=participant.last_name,
+                source_channel=f"Channel_{message.channel_id}",
+                interest_score=score,
+                message_text=message.text,
+                message_date=message.timestamp,
+                lead_quality="hot" if score >= 80 else "warm" if score >= 60 else "cold",
+                urgency_level="high" if self._check_ultra_strong_triggers(message.text) else "medium",
+                notes="Индивидуальное сообщение с покупательскими сигналами"
+            )
+            
+            await create_lead(lead)
+            logger.info(f"✅ Индивидуальный лид создан: {participant.display_name}")
+            return lead
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания индивидуального лида: {e}")
+            return None
 
     async def _should_analyze_dialogue_smart(self, dialogue_id: str, message_text: str) -> bool:
         """Ультра-умная проверка необходимости анализа диалога"""
@@ -998,15 +1093,21 @@ class UnifiedAIParser:
             ('отправьте договор', []),
         ]
         
-        for trigger, context_words in ultra_triggers:
-            if trigger in text_lower:
-                # Если нет контекстных слов, триггер срабатывает сразу
-                if not context_words:
+        for trigger in ultra_triggers:
+            if isinstance(trigger, tuple):
+                main_trigger, context_words = trigger
+                if main_trigger in text_lower:
+                    # Если нет контекстных слов, триггер срабатывает сразу
+                    if not context_words:
+                        logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер: '{main_trigger}' в сообщении")
+                        return True
+                    # Если есть контекстные слова, проверяем их наличие
+                    elif any(word in text_lower for word in context_words):
+                        logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер: '{main_trigger}' + контекст в сообщении")
+                        return True
+            else:
+                if trigger in text_lower:
                     logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер: '{trigger}' в сообщении")
-                    return True
-                # Если есть контекстные слова, проверяем их наличие
-                elif any(word in text_lower for word in context_words):
-                    logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер: '{trigger}' + контекст в сообщении")
                     return True
         
         return False
@@ -1154,7 +1255,7 @@ class UnifiedAIParser:
             # Сначала обрабатываем участников с созданными лидами (высокие проценты)
             for participant, lead_data in created_leads:
                 lead_probability = lead_data.get('lead_probability', 0)
-                role = lead_data.get('participant_role', 'participant')
+                role = lead_data.get('role_in_decision', 'participant')
                 
                 participants_info.append(
                     f"👤 {participant.display_name} (@{participant.username or 'no_username'}) - "
@@ -1170,7 +1271,7 @@ class UnifiedAIParser:
                     participant = dialogue.participants.get(user_id)
                     if participant:
                         lead_probability = lead_data.get('lead_probability', 0)
-                        role = lead_data.get('participant_role', 'observer')
+                        role = lead_data.get('role_in_decision', 'observer')
                         
                         participants_info.append(
                             f"👤 {participant.display_name} (@{participant.username or 'no_username'}) - "
@@ -1191,15 +1292,15 @@ class UnifiedAIParser:
             dialogue_history = []
             for msg in dialogue.messages:
                 timestamp = msg.timestamp.strftime("%H:%M")
-                username = msg.participant.username or "no_username"
+                username = msg.username or "no_username"
                 text = msg.text[:50] + "..." if len(msg.text) > 50 else msg.text
                 dialogue_history.append(f"[{timestamp}] {username}: {text}")
             
             history_text = "\n".join(dialogue_history)
             
             # Определяем временные рамки и бюджет
-            estimated_budget = analysis.estimated_budget if hasattr(analysis, 'estimated_budget') else "не определен"
-            timeline = analysis.timeline if hasattr(analysis, 'timeline') else "не определены"
+            estimated_budget = analysis.group_budget_estimate or "не определен"
+            timeline = analysis.estimated_timeline or "не определены"
             
             # Получаем название канала
             try:
@@ -1212,6 +1313,7 @@ class UnifiedAIParser:
             duration_minutes = (dialogue.messages[-1].timestamp - dialogue.messages[0].timestamp).seconds // 60
             
             message = f"""🔥 ЦЕННЫЙ ДИАЛОГ
+
 🤖 УМНЫЙ AI АНАЛИЗ ДИАЛОГА
 📺 Канал: {channel_name}
 🕐 Длительность: {duration_minutes} мин
@@ -1219,22 +1321,28 @@ class UnifiedAIParser:
 💬 Сообщений: {len(dialogue.messages)}
 📊 Уверенность: {analysis.confidence_score}%
 🏢 Бизнес-релевантность: {analysis.business_relevance_score}%
+
 📋 Суть диалога:
-{analysis.summary}
+{analysis.dialogue_summary}
+
 👥 Анализ участников:
 {participants_text}
+
 💡 Ключевые инсайты:
 {chr(10).join(f'• {insight}' for insight in analysis.key_insights)}
+
 🎯 Рекомендации:
-{chr(10).join(f'• {rec}' for rec in analysis.recommendations)}
-⚡️ Следующий шаг: {analysis.next_steps}
+{chr(10).join(f'• {rec}' for rec in analysis.recommended_actions)}
+
+⚡️ Следующий шаг: {analysis.next_best_action}
 📅 Временные рамки: {timeline}
 💰 Бюджет группы: {estimated_budget}
+
 📝 История диалога:
 {history_text}"""
 
             # Отправляем всем админам
-            admin_ids = self.config.get('telegram', {}).get('admin_ids', [])
+            admin_ids = self.config.get('bot', {}).get('admin_ids', [])
             
             for admin_id in admin_ids:
                 try:
@@ -1361,29 +1469,36 @@ class UnifiedAIParser:
             timestamp = message.timestamp.strftime("%H:%M")
             
             message_text = f"""🔥 СРОЧНО: {intent_type}!
-    🤖 УЛЬТРА-СИЛЬНЫЙ ПОКУПАТЕЛЬСКИЙ СИГНАЛ
-    📺 Канал: {channel_name}
-    🕐 Время: {timestamp}
-    👤 От: {participant.display_name} (@{participant.username or 'no_username'})
-    💬 Сообщение: "{message.text}"
-    📊 Уверенность: 95% (ультра-триггер)
-    🏢 Бизнес-релевантность: 95%
-    👥 Анализ участника:
-    {participant_info}
-    💡 Покупательские сигналы:
-    • Прямое выражение намерения купить/заказать
-    • Конкретная потребность указана
-    • Готовность к действию
-    🎯 СРОЧНЫЕ действия:
-    {chr(10).join(f'• {rec}' for rec in recommendations)}
-    ⚡️ НЕМЕДЛЕННО: {next_step}
-    💰 Потенциальный бюджет: требует уточнения
-    📅 Временные рамки: срочно (клиент готов)
-    🚨 ЭТО ГОТОВЫЙ ПОКУПАТЕЛЬ - РЕАГИРУЙТЕ МГНОВЕННО!
-    📞 Рекомендуется связаться в течение 15 минут!"""
+
+🤖 УЛЬТРА-СИЛЬНЫЙ ПОКУПАТЕЛЬСКИЙ СИГНАЛ
+📺 Канал: {channel_name}
+🕐 Время: {timestamp}
+👤 От: {participant.display_name} (@{participant.username or 'no_username'})
+💬 Сообщение: "{message.text}"
+
+📊 Уверенность: 95% (ультра-триггер)
+🏢 Бизнес-релевантность: 95%
+
+👥 Анализ участника:
+{participant_info}
+
+💡 Покупательские сигналы:
+• Прямое выражение намерения купить/заказать
+• Конкретная потребность указана
+• Готовность к действию
+
+🎯 СРОЧНЫЕ действия:
+{chr(10).join(f'• {rec}' for rec in recommendations)}
+
+⚡️ НЕМЕДЛЕННО: {next_step}
+💰 Потенциальный бюджет: требует уточнения
+📅 Временные рамки: срочно (клиент готов)
+
+🚨 ЭТО ГОТОВЫЙ ПОКУПАТЕЛЬ - РЕАГИРУЙТЕ МГНОВЕННО!
+📞 Рекомендуется связаться в течение 15 минут!"""
 
             # Отправляем всем админам
-            admin_ids = self.config.get('telegram', {}).get('admin_ids', [])
+            admin_ids = self.config.get('bot', {}).get('admin_ids', [])
             
             for admin_id in admin_ids:
                 try:
@@ -1400,73 +1515,6 @@ class UnifiedAIParser:
             
         except Exception as e:
             logger.error(f"❌ Ошибка СРОЧНОГО уведомления админов: {e}")
-
-    # Также обновите метод _check_ultra_strong_triggers для более широкого покрытия:
-    def _check_ultra_strong_triggers(self, message_text: str) -> bool:
-        """Проверка УЛЬТРА-СИЛЬНЫХ триггеров, которые игнорируют cooldown"""
-        text_lower = message_text.lower()
-        
-        # УЛЬТРА-СИЛЬНЫЕ триггеры - конкретные покупательские намерения
-        ultra_triggers = [
-            # Прямые покупательские намерения
-            'хочу купить',
-            'хочу заказать', 
-            'нужно купить',
-            'планируем купить',
-            'готов купить',
-            'готов заказать',
-            'готовы купить',
-            'готовы заказать',
-            'хочу оформить заказ',
-            'планируем заказать',
-            
-            # Конкретные бюджеты с намерениями (обновленная логика)
-            ('ккк', ['купить', 'заказать', 'нужно', 'планируем', 'бюджет']),
-            ('миллион', ['купить', 'заказать', 'бюджет', 'готовы']),
-            ('тысяч', ['купить', 'заказать', 'бюджет', 'готовы']),
-            ('млн', ['купить', 'заказать', 'бюджет', 'готовы']),
-            
-            # Очень конкретные суммы
-            ('100000', ['рублей', 'долларов', 'евро']),
-            ('500000', ['рублей', 'долларов', 'евро']),
-            ('1000000', ['рублей', 'долларов', 'евро']),
-            
-            # Готовность к действию
-            'готов подписать',
-            'готовы подписать',
-            'когда подписываем',
-            'отправьте договор',
-            'есть техзадание',
-            'когда можем начать',
-            'когда можем стартовать',
-            'хочу техзадание',
-            'нужен договор',
-        ]
-        
-        for trigger in ultra_triggers:
-            if isinstance(trigger, tuple):
-                # Триггер с контекстными словами
-                main_trigger, context_words = trigger
-                if main_trigger in text_lower and any(word in text_lower for word in context_words):
-                    logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер: '{main_trigger}' + контекст в сообщении")
-                    return True
-            else:
-                # Простой триггер
-                if trigger in text_lower:
-                    logger.info(f"🔥🔥 УЛЬТРА-СИЛЬНЫЙ триггер: '{trigger}' в сообщении")
-                    return True
-        
-        return False
-
-
-    def _has_strong_business_signals(self, text: str) -> bool:
-        """Проверка сильных бизнес-сигналов"""
-        strong_signals = [
-            'хочу купить', 'готов заказать', 'какая цена', 'сколько стоит',
-            'нужен бот', 'заказать crm', 'бюджет', 'покупаем'
-        ]
-        text_lower = text.lower()
-        return any(signal in text_lower for signal in strong_signals)
 
     def is_channel_monitored(self, chat_id: int, chat_username: str = None) -> bool:
         """Проверка мониторинга канала"""
