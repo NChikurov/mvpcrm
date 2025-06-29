@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI CRM Bot - Оптимизированная версия main.py
-Улучшенное логирование, структурированная обработка ошибок, метрики производительности
+AI CRM Bot - ИСПРАВЛЕННАЯ версия main.py
+Решение проблем: Unicode, импорты, контекст приложения
 """
 
 import asyncio
@@ -11,10 +11,24 @@ import sys
 import os
 import json
 import time
+import signal
 from datetime import datetime, timedelta
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional
+
+# ИСПРАВЛЕНИЕ КОДИРОВКИ для Windows
+if sys.platform == "win32":
+    # Устанавливаем UTF-8 кодировку для консоли
+    os.system("chcp 65001 > nul")
+    
+    # Настраиваем stdout/stderr для UTF-8
+    import codecs
+    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
+    sys.stderr = codecs.getwriter("utf-8")(sys.stderr.detach())
+    
+    # Переменная окружения для Python
+    os.environ["PYTHONIOENCODING"] = "utf-8"
 
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 
@@ -28,7 +42,7 @@ from database.dialogue_db_migration import migrate_database_for_dialogues
 from handlers.user import UserHandler
 from handlers.admin import AdminHandler
 
-# Настройка структурированного логирования
+# ИСПРАВЛЕННАЯ настройка логирования с UTF-8
 LOGGING_CONFIG = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -39,10 +53,6 @@ LOGGING_CONFIG = {
         },
         'simple': {
             'format': '%(levelname)s | %(name)s | %(message)s'
-        },
-        'json': {
-            'format': '%(asctime)s %(name)s %(levelname)s %(message)s',
-            'class': 'pythonjsonlogger.jsonlogger.JsonFormatter'
         }
     },
     'handlers': {
@@ -58,7 +68,8 @@ LOGGING_CONFIG = {
             'formatter': 'detailed',
             'filename': 'logs/ai_crm_bot.log',
             'maxBytes': 10485760,  # 10MB
-            'backupCount': 5
+            'backupCount': 5,
+            'encoding': 'utf-8'  # Явно указываем UTF-8
         },
         'error_file': {
             'class': 'logging.handlers.RotatingFileHandler',
@@ -66,7 +77,8 @@ LOGGING_CONFIG = {
             'formatter': 'detailed',
             'filename': 'logs/errors.log',
             'maxBytes': 5242880,  # 5MB
-            'backupCount': 3
+            'backupCount': 3,
+            'encoding': 'utf-8'  # Явно указываем UTF-8
         }
     },
     'loggers': {
@@ -86,22 +98,24 @@ LOGGING_CONFIG = {
 }
 
 def setup_logging():
-    """Настройка логирования с созданием директории"""
+    """Настройка логирования с созданием директории и UTF-8"""
     logs_dir = Path('logs')
     logs_dir.mkdir(exist_ok=True)
     
     try:
         logging.config.dictConfig(LOGGING_CONFIG)
-    except Exception:
-        # Fallback к базовому логированию
+    except Exception as e:
+        # Fallback к базовому логированию с UTF-8
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
             handlers=[
                 logging.StreamHandler(),
-                logging.FileHandler('logs/ai_crm_bot.log')
-            ]
+                logging.FileHandler('logs/ai_crm_bot.log', encoding='utf-8')
+            ],
+            force=True
         )
+        print(f"Warning: Using fallback logging due to: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +145,8 @@ class PerformanceMetrics:
         if len(self.processing_times) > 1000:
             self.processing_times = self.processing_times[-500:]
         
-        self.metrics['average_processing_time'] = sum(self.processing_times) / len(self.processing_times)
+        if self.processing_times:
+            self.metrics['average_processing_time'] = sum(self.processing_times) / len(self.processing_times)
     
     def record_ai_analysis(self):
         """Записать выполненный AI анализ"""
@@ -178,22 +193,9 @@ class PerformanceMetrics:
             return f"{hours}h {minutes}m"
         else:
             return f"{minutes}m"
-    
-    def reset_daily_metrics(self):
-        """Сброс ежедневных метрик"""
-        self.metrics.update({
-            'messages_processed': 0,
-            'ai_analyses_completed': 0,
-            'dialogues_created': 0,
-            'leads_generated': 0,
-            'notifications_sent': 0,
-            'errors_count': 0,
-            'last_reset': datetime.now()
-        })
-        self.processing_times.clear()
 
 class OptimizedAIBot:
-    """Оптимизированный класс AI CRM бота"""
+    """Оптимизированный класс AI CRM бота с исправлениями"""
     
     def __init__(self):
         self.config: Optional[Dict[str, Any]] = None
@@ -203,8 +205,21 @@ class OptimizedAIBot:
         self.ai_parser: Optional[Any] = None
         self.metrics = PerformanceMetrics()
         self.is_running = False
+        self._shutdown_requested = False
+        
+        # Настраиваем обработку сигналов
+        self._setup_signal_handlers()
         
         logger.info("🚀 Инициализация оптимизированного AI CRM бота")
+
+    def _setup_signal_handlers(self):
+        """Настройка обработчиков сигналов для корректного завершения"""
+        def signal_handler(signum, frame):
+            logger.info(f"Получен сигнал {signum}, запуск процедуры завершения...")
+            self._shutdown_requested = True
+            
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
     async def initialize(self):
         """Асинхронная инициализация бота"""
@@ -251,13 +266,15 @@ class OptimizedAIBot:
             for warning in validation_report['warnings']:
                 logger.warning(f"⚠️ Предупреждение: {warning}")
         
-        # Логируем ключевую информацию
+        # Логируем ключевую информацию (безопасно для Unicode)
         info = validation_report['info']
         logger.info(f"🤖 Бот: {info['bot_name']}")
         logger.info(f"👑 Админов: {info['admin_count']}")
-        logger.info(f"🧠 Claude API: {'✅' if info['claude_enabled'] else '⚠️ Simple mode'}")
+        claude_status = "✅" if info['claude_enabled'] else "⚠️ Simple mode"
+        logger.info(f"🧠 Claude API: {claude_status}")
         logger.info(f"📺 Каналов: {info['channels_count']}")
-        logger.info(f"💬 Анализ диалогов: {'✅' if info['dialogue_analysis_enabled'] else '❌'}")
+        dialogue_status = "✅" if info['dialogue_analysis_enabled'] else "❌"
+        logger.info(f"💬 Анализ диалогов: {dialogue_status}")
 
     async def _setup_database(self):
         """Настройка базы данных"""
@@ -278,12 +295,20 @@ class OptimizedAIBot:
             raise
 
     async def _create_telegram_app(self):
-        """Создание Telegram приложения"""
+        """Создание Telegram приложения с правильной конфигурацией"""
         logger.info("📱 Создание Telegram приложения...")
         
         try:
             bot_token = self.config['bot']['token']
-            self.app = Application.builder().token(bot_token).build()
+            # ИСПРАВЛЕНИЕ: Используем builder с правильными настройками
+            builder = Application.builder()
+            builder.token(bot_token)
+            
+            # Настройки для избежания конфликтов
+            builder.concurrent_updates(True)
+            builder.rate_limiter(None)  # Отключаем встроенный rate limiter
+            
+            self.app = builder.build()
             
             logger.info("✅ Telegram приложение создано")
             
@@ -306,33 +331,40 @@ class OptimizedAIBot:
             raise
 
     async def _setup_ai_parser(self):
-        """Настройка AI парсера"""
+        """Настройка AI парсера с исправлением импортов"""
         logger.info("🤖 Настройка AI парсера...")
         
         try:
-            # Безопасный импорт парсера
-            from myparser import OptimizedUnifiedParser
+            # ИСПРАВЛЕНИЕ: Безопасный импорт с fallback
+            try:
+                from myparser.main_parser import OptimizedUnifiedParser
+                self.ai_parser = OptimizedUnifiedParser(self.config)
+                logger.info("✅ Использован OptimizedUnifiedParser")
+            except ImportError as e:
+                logger.warning(f"Не удалось импортировать OptimizedUnifiedParser: {e}")
+                
+                # Fallback на основной парсер
+                try:
+                    from myparser.main_parser import UnifiedAIParser
+                    self.ai_parser = UnifiedAIParser(self.config)
+                    logger.info("✅ Использован UnifiedAIParser")
+                except ImportError:
+                    # Последний fallback
+                    from myparser import UnifiedAIParser
+                    self.ai_parser = UnifiedAIParser(self.config)
+                    logger.info("✅ Использован базовый UnifiedAIParser")
             
-            self.ai_parser = OptimizedUnifiedParser(self.config)
             self.app.bot_data['ai_parser'] = self.ai_parser
             
             # Передаем метрики парсеру
-            self.ai_parser.metrics_callback = self._record_parser_metrics
+            if hasattr(self.ai_parser, 'set_metrics_callback'):
+                self.ai_parser.set_metrics_callback(self._record_parser_metrics)
             
             logger.info("✅ AI парсер настроен")
             
-        except ImportError as e:
-            logger.error(f"❌ Не удалось импортировать оптимизированный парсер: {e}")
-            
-            # Fallback
-            try:
-                from myparser import UnifiedAIParser
-                self.ai_parser = UnifiedAIParser(self.config)
-                self.app.bot_data['ai_parser'] = self.ai_parser
-                logger.warning("⚠️ Используется базовый парсер")
-            except Exception as fallback_error:
-                logger.error(f"❌ Критическая ошибка: парсер недоступен: {fallback_error}")
-                self.ai_parser = None
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка: парсер недоступен: {e}")
+            self.ai_parser = None
 
     def _record_parser_metrics(self, event_type: str, **kwargs):
         """Запись метрик от парсера"""
@@ -401,7 +433,7 @@ class OptimizedAIBot:
             chat = update.effective_chat
             user = update.effective_user
             
-            # Структурированное логирование
+            # Структурированное логирование (безопасное для Unicode)
             log_data = {
                 'event': 'message_received',
                 'user_id': user.id,
@@ -411,7 +443,7 @@ class OptimizedAIBot:
                 'timestamp': datetime.now().isoformat()
             }
             
-            logger.info(f"📨 Message received: {json.dumps(log_data)}")
+            logger.info(f"📨 Message received: {json.dumps(log_data, ensure_ascii=False)}")
             
             if chat.type == 'private':
                 # Личные сообщения
@@ -420,7 +452,7 @@ class OptimizedAIBot:
                 
             elif chat.type in ['group', 'supergroup', 'channel']:
                 # Групповые сообщения - AI парсинг
-                if self.ai_parser and self.ai_parser.enabled:
+                if self.ai_parser and hasattr(self.ai_parser, 'enabled') and self.ai_parser.enabled:
                     if self.ai_parser.is_channel_monitored(chat.id, chat.username):
                         logger.debug(f"Processing group message from channel {chat.id}")
                         await self.ai_parser.process_message(update, context)
@@ -456,10 +488,11 @@ class OptimizedAIBot:
             status_info.append("🤖 **Статус AI CRM системы**\n")
             
             # AI парсер
-            if self.ai_parser:
+            if self.ai_parser and hasattr(self.ai_parser, 'get_status'):
                 parser_status = self.ai_parser.get_status()
-                status_info.append(f"🔍 **AI Парсер:** {'✅ Активен' if parser_status['enabled'] else '❌ Отключен'}")
-                status_info.append(f"📺 **Каналов:** {parser_status['channels_count']}")
+                status_enabled = "✅ Активен" if parser_status.get('enabled') else "❌ Отключен"
+                status_info.append(f"🔍 **AI Парсер:** {status_enabled}")
+                status_info.append(f"📺 **Каналов:** {parser_status.get('channels_count', 0)}")
                 status_info.append(f"💬 **Активных диалогов:** {parser_status.get('active_dialogues', 0)}")
                 status_info.append(f"🎯 **Режим:** {parser_status.get('mode', 'unknown')}")
             else:
@@ -471,7 +504,8 @@ class OptimizedAIBot:
                 claude_client = get_claude_client()
                 if claude_client:
                     health = await claude_client.health_check()
-                    status_info.append(f"🧠 **Claude API:** {'✅ Работает' if health else '⚠️ Недоступен'}")
+                    claude_status = "✅ Работает" if health else "⚠️ Недоступен"
+                    status_info.append(f"🧠 **Claude API:** {claude_status}")
                 else:
                     status_info.append("🧠 **Claude API:** ❌ Не инициализирован")
             except Exception:
@@ -529,9 +563,7 @@ class OptimizedAIBot:
 
 ⚠️ **Надежность:**
 • Ошибок: {metrics['errors_count']}
-• Коэффициент ошибок: {metrics['error_rate']:.2%}
-
-🔄 **Последний сброс:** {metrics['last_reset'].strftime('%d.%m.%Y %H:%M')}"""
+• Коэффициент ошибок: {metrics['error_rate']:.2%}"""
 
             if parser_metrics and not parser_metrics.get('no_data'):
                 message += f"""
@@ -566,7 +598,7 @@ class OptimizedAIBot:
                 await get_bot_stats()
                 health_status.append("💾 **База данных:** ✅ Работает")
             except Exception as e:
-                health_status.append(f"💾 **База данных:** ❌ Ошибка - {e}")
+                health_status.append(f"💾 **База данных:** ❌ Ошибка")
                 overall_health = False
             
             # Проверка Claude API
@@ -575,13 +607,14 @@ class OptimizedAIBot:
                 claude_client = get_claude_client()
                 if claude_client:
                     claude_health = await claude_client.health_check()
-                    health_status.append(f"🧠 **Claude API:** {'✅ Работает' if claude_health else '⚠️ Недоступен'}")
+                    claude_status = "✅ Работает" if claude_health else "⚠️ Недоступен"
+                    health_status.append(f"🧠 **Claude API:** {claude_status}")
                     if not claude_health:
                         overall_health = False
                 else:
                     health_status.append("🧠 **Claude API:** ⚠️ Не настроен (простой режим)")
-            except Exception as e:
-                health_status.append(f"🧠 **Claude API:** ❌ Ошибка - {e}")
+            except Exception:
+                health_status.append("🧠 **Claude API:** ❌ Ошибка")
                 overall_health = False
             
             # Проверка AI парсера
@@ -625,6 +658,10 @@ class OptimizedAIBot:
                 await update.message.reply_text("❌ Трекер диалогов недоступен")
                 return
             
+            if not hasattr(self.ai_parser.dialogue_tracker, 'active_dialogues'):
+                await update.message.reply_text("❌ Активные диалоги недоступны")
+                return
+                
             active_dialogues = self.ai_parser.dialogue_tracker.active_dialogues
             
             if not active_dialogues:
@@ -685,77 +722,103 @@ class OptimizedAIBot:
 
     @asynccontextmanager
     async def run_context(self):
-        """Контекстный менеджер для запуска бота"""
+        """ИСПРАВЛЕННЫЙ контекстный менеджер для запуска бота"""
         try:
             self.is_running = True
-            async with self.app:
-                await self.app.initialize()
-                await self.app.start()
-                
-                # Проверяем доступ к каналам
-                await self.check_channels_access()
-                
-                logger.info("🎉 AI CRM Bot успешно запущен!")
-                
-                # Информация о режиме работы
-                if self.ai_parser:
-                    status = self.ai_parser.get_status()
-                    logger.info(f"🎯 Режим: {status.get('mode', 'unknown')}")
-                    logger.info(f"📺 Мониторинг {status['channels_count']} каналов")
-                    logger.info(f"🧠 AI анализатор: {status.get('analyzer_type', 'unknown')}")
-                
-                yield
+            
+            # ИСПРАВЛЕНИЕ: Правильная инициализация приложения
+            await self.app.initialize()
+            await self.app.start()
+            
+            # Проверяем доступ к каналам
+            await self.check_channels_access()
+            
+            logger.info("🎉 AI CRM Bot успешно запущен!")
+            
+            # Информация о режиме работы
+            if self.ai_parser and hasattr(self.ai_parser, 'get_status'):
+                status = self.ai_parser.get_status()
+                logger.info(f"🎯 Режим: {status.get('mode', 'unknown')}")
+                logger.info(f"📺 Мониторинг {status.get('channels_count', 0)} каналов")
+            
+            yield
+            
         except Exception as e:
             logger.error(f"Ошибка в контексте запуска: {e}")
             raise
         finally:
             self.is_running = False
-            logger.info("🛑 AI CRM Bot остановлен")
+            # ИСПРАВЛЕНИЕ: Правильное завершение приложения
+            try:
+                if self.app and self.app.updater and self.app.updater.running:
+                    await self.app.updater.stop()
+                if self.app:
+                    await self.app.stop()
+                    await self.app.shutdown()
+                logger.info("🛑 AI CRM Bot остановлен")
+            except Exception as e:
+                logger.error(f"Ошибка при остановке: {e}")
 
     async def run(self):
-        """Главный метод запуска бота"""
+        """Главный метод запуска бота с исправлениями"""
         try:
             await self.initialize()
             
             async with self.run_context():
-                # Запуск polling
+                # ИСПРАВЛЕНИЕ: Правильный запуск polling
                 await self.app.updater.start_polling(
                     drop_pending_updates=True,
                     allowed_updates=['message', 'callback_query']
                 )
                 
+                logger.info("🚀 Бот запущен и готов к работе!")
+                
                 # Запуск фоновых задач
-                await self._start_background_tasks()
+                asyncio.create_task(self._background_tasks())
                 
-                # Ожидание завершения
-                await asyncio.Future()  # Работает до Ctrl+C
+                # Основной цикл с проверкой сигналов
+                while not self._shutdown_requested:
+                    await asyncio.sleep(1)
                 
+                logger.info("🛑 Получен сигнал завершения")
+                
+        except KeyboardInterrupt:
+            logger.info("👋 Получен сигнал остановки (Ctrl+C)")
         except Exception as e:
             logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
             raise
 
-    async def _start_background_tasks(self):
-        """Запуск фоновых задач"""
-        # Ежедневный сброс метрик
-        asyncio.create_task(self._daily_metrics_reset())
-        
-        # Мониторинг производительности
-        asyncio.create_task(self._performance_monitor())
+    async def _background_tasks(self):
+        """Фоновые задачи"""
+        try:
+            # Ежедневный сброс метрик
+            asyncio.create_task(self._daily_metrics_reset())
+            
+            # Мониторинг производительности
+            asyncio.create_task(self._performance_monitor())
+            
+        except Exception as e:
+            logger.error(f"Ошибка запуска фоновых задач: {e}")
 
     async def _daily_metrics_reset(self):
         """Ежедневный сброс метрик"""
-        while self.is_running:
+        while self.is_running and not self._shutdown_requested:
             try:
                 # Ждем до следующего дня
                 now = datetime.now()
                 tomorrow = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 sleep_time = (tomorrow - now).total_seconds()
                 
-                await asyncio.sleep(sleep_time)
+                # Ждем с проверкой сигнала завершения
+                for _ in range(int(sleep_time)):
+                    if self._shutdown_requested:
+                        break
+                    await asyncio.sleep(1)
                 
-                # Сбрасываем метрики
-                self.metrics.reset_daily_metrics()
-                logger.info("📊 Ежедневные метрики сброшены")
+                if not self._shutdown_requested:
+                    # Сбрасываем метрики
+                    self.metrics = PerformanceMetrics()
+                    logger.info("📊 Ежедневные метрики сброшены")
                 
             except asyncio.CancelledError:
                 break
@@ -765,9 +828,12 @@ class OptimizedAIBot:
 
     async def _performance_monitor(self):
         """Мониторинг производительности"""
-        while self.is_running:
+        while self.is_running and not self._shutdown_requested:
             try:
                 await asyncio.sleep(300)  # Каждые 5 минут
+                
+                if self._shutdown_requested:
+                    break
                 
                 metrics = self.metrics.get_metrics()
                 
@@ -792,8 +858,8 @@ class OptimizedAIBot:
                 logger.error(f"Ошибка мониторинга производительности: {e}")
 
 def main():
-    """Главная функция"""
-    # Настройка логирования
+    """Главная функция с исправлениями кодировки"""
+    # ИСПРАВЛЕНИЕ: Настройка кодировки перед логированием
     setup_logging()
     
     try:
