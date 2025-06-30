@@ -1,6 +1,6 @@
 """
-myparser/main_parser.py - ОПТИМИЗИРОВАННЫЙ AI парсер
-Рефакторинг согласно SOLID принципам, оптимизация производительности
+myparser/main_parser.py - ИСПРАВЛЕННАЯ версия с подробным логированием
+Добавлено детальное логирование сообщений, AI анализа и уведомлений
 """
 
 import asyncio
@@ -18,23 +18,6 @@ from database.models import Lead
 from ai.claude_client import get_claude_client
 
 logger = logging.getLogger(__name__)
-
-# === ПРОТОКОЛЫ И ИНТЕРФЕЙСЫ (SOLID - Interface Segregation) ===
-
-class MessageAnalyzer(Protocol):
-    """Протокол для анализаторов сообщений"""
-    async def analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        ...
-
-class NotificationSender(Protocol):
-    """Протокол для отправки уведомлений"""
-    async def send_notification(self, notification_data: Dict[str, Any]) -> bool:
-        ...
-
-class DialogueTracker(Protocol):
-    """Протокол для трекинга диалогов"""
-    async def track_message(self, update: Update) -> Optional[str]:
-        ...
 
 # === МОДЕЛИ ДАННЫХ ===
 
@@ -80,33 +63,7 @@ class AnalysisResult:
     next_steps: str
     priority_level: str = "medium"
 
-# === ФАБРИКИ (SOLID - Factory Pattern) ===
-
-class AnalyzerFactory:
-    """Фабрика анализаторов"""
-    
-    @staticmethod
-    def create_message_analyzer(analyzer_type: str) -> MessageAnalyzer:
-        if analyzer_type == "claude":
-            return ClaudeMessageAnalyzer()
-        elif analyzer_type == "simple":
-            return SimpleMessageAnalyzer()
-        else:
-            raise ValueError(f"Unknown analyzer type: {analyzer_type}")
-
-class NotificationFactory:
-    """Фабрика уведомлений"""
-    
-    @staticmethod
-    def create_sender(sender_type: str) -> NotificationSender:
-        if sender_type == "telegram":
-            return TelegramNotificationSender()
-        elif sender_type == "webhook":
-            return WebhookNotificationSender()
-        else:
-            raise ValueError(f"Unknown sender type: {sender_type}")
-
-# === СТРАТЕГИИ АНАЛИЗА (SOLID - Strategy Pattern) ===
+# === АНАЛИЗАТОРЫ С УЛУЧШЕННЫМ ЛОГИРОВАНИЕМ ===
 
 class BaseMessageAnalyzer(ABC):
     """Базовый класс для анализаторов сообщений"""
@@ -116,23 +73,37 @@ class BaseMessageAnalyzer(ABC):
         pass
 
 class ClaudeMessageAnalyzer(BaseMessageAnalyzer):
-    """Анализатор с использованием Claude API"""
+    """Анализатор с использованием Claude API с подробным логированием"""
     
     def __init__(self):
         self.client = get_claude_client()
-        self._cache = {}  # Простой кэш для избежания повторных запросов
+        self._cache = {}
     
     async def analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Анализ с детальным логированием"""
+        # ИСПРАВЛЕНИЕ: Подробное логирование входных данных
+        logger.info(f"🔍 AI АНАЛИЗ НАЧАТ")
+        logger.info(f"📝 Сообщение для анализа: '{message[:100]}...' (длина: {len(message)})")
+        logger.info(f"👥 Участники: {context.get('participants_info', 'Нет данных')}")
+        logger.info(f"💬 История диалога: {len(context.get('dialogue_history', '').split('\\n'))} сообщений")
+        
         # Проверяем кэш
         cache_key = f"{hash(message)}_{hash(str(context))}"
         if cache_key in self._cache:
+            logger.info("💾 Результат получен из кэша")
             return self._cache[cache_key]
         
         if not self.client or not self.client.client:
-            return SimpleMessageAnalyzer().analyze(message, context)
+            logger.warning("⚠️ Claude API недоступен, переходим к простому анализу")
+            return await SimpleMessageAnalyzer().analyze(message, context)
         
         try:
             prompt = self._build_optimized_prompt(message, context)
+            
+            # ИСПРАВЛЕНИЕ: Логируем промпт (обрезанный)
+            logger.debug(f"🤖 Промпт для Claude: {prompt[:300]}...")
+            
+            start_time = datetime.now()
             
             response = await asyncio.wait_for(
                 self.client.client.messages.create(
@@ -141,40 +112,69 @@ class ClaudeMessageAnalyzer(BaseMessageAnalyzer):
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1
                 ),
-                timeout=10.0
+                timeout=15.0  # Увеличили таймаут
             )
             
-            result = self._parse_response(response.content[0].text)
+            duration = (datetime.now() - start_time).total_seconds()
+            
+            # ИСПРАВЛЕНИЕ: Подробное логирование ответа
+            raw_response = response.content[0].text
+            logger.info(f"🤖 Claude ответил за {duration:.2f}с")
+            logger.info(f"📄 Сырой ответ Claude: {raw_response[:500]}...")
+            
+            result = self._parse_response(raw_response)
+            
+            # ИСПРАВЛЕНИЕ: Логируем результат анализа
+            logger.info(f"✅ АНАЛИЗ ЗАВЕРШЕН:")
+            logger.info(f"   🎯 Ценный диалог: {result.get('is_valuable_dialogue', False)}")
+            logger.info(f"   📊 Уверенность: {result.get('confidence_score', 0)}%")
+            logger.info(f"   🏢 Бизнес-релевантность: {result.get('business_relevance_score', 0)}%")
+            logger.info(f"   👥 Потенциальных лидов: {len(result.get('potential_leads', []))}")
+            
+            # Детально логируем каждого потенциального лида
+            for i, lead in enumerate(result.get('potential_leads', [])):
+                logger.info(f"   🎯 Лид {i+1}: user_id={lead.get('user_id')}, "
+                          f"вероятность={lead.get('lead_probability', 0)}%, "
+                          f"качество={lead.get('lead_quality', 'unknown')}")
             
             # Кэшируем результат
             self._cache[cache_key] = result
-            if len(self._cache) > 100:  # Ограничиваем размер кэша
+            if len(self._cache) > 100:
                 self._cache.clear()
             
             return result
             
+        except asyncio.TimeoutError:
+            logger.error("⏰ Claude API timeout - переходим к простому анализу")
+            return await SimpleMessageAnalyzer().analyze(message, context)
         except Exception as e:
-            logger.warning(f"Claude analysis failed: {e}, falling back to simple analysis")
+            logger.error(f"❌ Ошибка Claude API: {e} - переходим к простому анализу")
             return await SimpleMessageAnalyzer().analyze(message, context)
     
     def _build_optimized_prompt(self, message: str, context: Dict[str, Any]) -> str:
-        """Оптимизированный промпт для анализа"""
+        """Улучшенный промпт для анализа"""
         participants_info = context.get('participants_info', '')
         dialogue_history = context.get('dialogue_history', '')
         
-        return f"""Проанализируй бизнес-диалог и верни ТОЛЬКО JSON без дополнительного текста:
+        return f"""Проанализируй бизнес-диалог и верни ТОЛЬКО JSON:
 
-ДИАЛОГ:
-{dialogue_history}
+КОНТЕКСТ:
+Канал: {context.get('channel_title', 'Unknown')}
+Участники: {participants_info}
 
-УЧАСТНИКИ:
-{participants_info}
+ИСТОРИЯ ДИАЛОГА:
+{dialogue_history[-1000:]}  # Ограничиваем размер
 
 НОВОЕ СООБЩЕНИЕ: "{message}"
 
 ЗАДАЧА: Определи покупательские намерения и роли участников.
 
 ВАЖНО: Включи ВСЕХ участников с их реальными user_id в potential_leads.
+
+ИЩИ СИГНАЛЫ:
+🔥 ГОРЯЧИЕ: "купить", "заказать", "готов подписать", "бюджет есть"
+⭐ ТЕПЛЫЕ: "цена", "стоимость", "когда можем начать", "техзадание"
+👍 ИНТЕРЕС: "подробнее", "как работает", "возможности", "сравниваем"
 
 JSON:
 {{
@@ -183,52 +183,68 @@ JSON:
     "business_relevance_score": число_0_100,
     "potential_leads": [
         {{
-            "user_id": конкретный_id,
+            "user_id": конкретный_id_числом,
             "lead_probability": число_0_100,
             "lead_quality": "hot/warm/cold",
-            "key_signals": ["список"],
+            "key_signals": ["список_найденных_сигналов"],
             "role_in_decision": "decision_maker/influencer/observer/budget_holder",
-            "urgency_indicators": ["список"],
-            "estimated_budget_range": "диапазон или null"
+            "urgency_indicators": ["список_срочности"],
+            "estimated_budget_range": "диапазон_или_null"
         }}
     ],
-    "dialogue_summary": "краткое описание",
-    "key_insights": ["список инсайтов"],
-    "recommended_actions": ["список действий"],
-    "next_best_action": "следующий шаг",
-    "priority_level": "low/medium/high/urgent",
-    "estimated_timeline": "сроки",
-    "group_dynamics": {{
-        "decision_making_style": "описание",
-        "influence_patterns": "описание",
-        "consensus_level": число_0_100
-    }}
+    "dialogue_summary": "краткое_описание_сути",
+    "key_insights": ["список_инсайтов"],
+    "recommended_actions": ["список_действий"],
+    "next_best_action": "следующий_шаг",
+    "priority_level": "low/medium/high/urgent"
 }}"""
 
     def _parse_response(self, response_text: str) -> Dict[str, Any]:
-        """Парсинг ответа от Claude"""
+        """Улучшенный парсинг ответа от Claude"""
         try:
+            # Ищем JSON в ответе
             import re
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                result = json.loads(json_match.group())
+                
+                # ИСПРАВЛЕНИЕ: Валидируем и исправляем результат
+                if not isinstance(result.get('potential_leads'), list):
+                    result['potential_leads'] = []
+                
+                # Проверяем корректность user_id в лидах
+                valid_leads = []
+                for lead in result.get('potential_leads', []):
+                    if isinstance(lead.get('user_id'), (int, str)):
+                        try:
+                            lead['user_id'] = int(lead['user_id'])
+                            valid_leads.append(lead)
+                        except (ValueError, TypeError):
+                            logger.warning(f"Некорректный user_id в лиде: {lead.get('user_id')}")
+                
+                result['potential_leads'] = valid_leads
+                logger.info(f"✅ Парсинг успешен, валидных лидов: {len(valid_leads)}")
+                return result
             else:
-                raise ValueError("JSON not found in response")
+                raise ValueError("JSON не найден в ответе")
+                
         except Exception as e:
-            logger.error(f"Failed to parse Claude response: {e}")
+            logger.error(f"❌ Ошибка парсинга ответа Claude: {e}")
+            logger.error(f"📄 Сырой ответ: {response_text[:200]}...")
             return {
                 "is_valuable_dialogue": False,
                 "confidence_score": 0,
                 "business_relevance_score": 0,
                 "potential_leads": [],
-                "dialogue_summary": "Analysis failed",
+                "dialogue_summary": f"Ошибка анализа: {str(e)}",
                 "key_insights": [],
-                "recommended_actions": [],
-                "next_best_action": "Manual review required"
+                "recommended_actions": ["Требуется ручная проверка"],
+                "next_best_action": "Manual review required",
+                "priority_level": "low"
             }
 
 class SimpleMessageAnalyzer(BaseMessageAnalyzer):
-    """Простой анализатор без AI"""
+    """Улучшенный простой анализатор без AI с логированием"""
     
     def __init__(self):
         self.business_keywords = [
@@ -243,19 +259,21 @@ class SimpleMessageAnalyzer(BaseMessageAnalyzer):
         ]
     
     async def analyze(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Простой анализ с логированием"""
+        logger.info("🔄 Используем простой анализ (без AI)")
+        logger.info(f"📝 Анализируем: '{message[:100]}...'")
+        
         message_lower = message.lower()
         
         # Анализ бизнес-сигналов
-        business_score = sum(10 for keyword in self.business_keywords if keyword in message_lower)
-        business_score = min(business_score, 100)
+        found_business = [kw for kw in self.business_keywords if kw in message_lower]
+        found_urgency = [kw for kw in self.urgency_keywords if kw in message_lower]
+        found_decision = [kw for kw in self.decision_keywords if kw in message_lower]
         
-        # Анализ срочности
-        urgency_score = sum(15 for keyword in self.urgency_keywords if keyword in message_lower)
+        business_score = min(len(found_business) * 20, 100)
+        urgency_score = min(len(found_urgency) * 15, 100)
+        decision_score = min(len(found_decision) * 25, 100)
         
-        # Анализ роли в принятии решений
-        decision_score = sum(20 for keyword in self.decision_keywords if keyword in message_lower)
-        
-        # Итоговый скор
         total_score = min(business_score + urgency_score + decision_score, 100)
         
         # Определение качества лида
@@ -274,80 +292,84 @@ class SimpleMessageAnalyzer(BaseMessageAnalyzer):
         else:
             role = "observer"
         
-        return {
+        # ИСПРАВЛЕНИЕ: Логируем найденные ключевые слова
+        logger.info(f"🔍 Найденные бизнес-слова: {found_business}")
+        logger.info(f"⚡ Найденные слова срочности: {found_urgency}")
+        logger.info(f"👑 Найденные слова принятия решений: {found_decision}")
+        logger.info(f"📊 Итоговый скор: {total_score}% (бизнес: {business_score}, срочность: {urgency_score}, решения: {decision_score})")
+        
+        result = {
             "is_valuable_dialogue": total_score >= 40,
-            "confidence_score": min(total_score + 20, 100),  # Немного повышаем уверенность
+            "confidence_score": min(total_score + 20, 100),
             "business_relevance_score": business_score,
             "potential_leads": [{
                 "user_id": context.get('current_user_id', 0),
                 "lead_probability": total_score,
                 "lead_quality": quality,
-                "key_signals": self._extract_signals(message_lower),
-                "role_in_decision": role
+                "key_signals": found_business + found_urgency + found_decision,
+                "role_in_decision": role,
+                "urgency_indicators": found_urgency,
+                "estimated_budget_range": "unknown"
             }] if total_score >= 30 else [],
-            "dialogue_summary": f"Message analysis: {total_score}% relevance",
-            "key_insights": self._generate_insights(message_lower, total_score),
+            "dialogue_summary": f"Простой анализ: {total_score}% релевантность, найдено сигналов: {len(found_business + found_urgency + found_decision)}",
+            "key_insights": self._generate_insights(found_business, found_urgency, found_decision, total_score),
             "recommended_actions": self._generate_actions(quality),
             "next_best_action": self._get_next_action(quality),
             "priority_level": "high" if total_score >= 80 else "medium" if total_score >= 60 else "low"
         }
+        
+        logger.info(f"✅ Простой анализ завершен: ценность={result['is_valuable_dialogue']}, лидов={len(result['potential_leads'])}")
+        return result
     
-    def _extract_signals(self, message_lower: str) -> List[str]:
-        signals = []
-        if any(kw in message_lower for kw in ['купить', 'заказать']):
-            signals.append('purchase_intent')
-        if any(kw in message_lower for kw in ['цена', 'стоимость']):
-            signals.append('price_inquiry')
-        if any(kw in message_lower for kw in ['срочно', 'быстро']):
-            signals.append('urgency')
-        return signals
-    
-    def _generate_insights(self, message_lower: str, score: int) -> List[str]:
+    def _generate_insights(self, business_words: List[str], urgency_words: List[str], 
+                          decision_words: List[str], score: int) -> List[str]:
         insights = []
         if score >= 70:
-            insights.append("High purchase intent detected")
-        if 'бюджет' in message_lower:
-            insights.append("Budget discussion initiated")
-        if any(kw in message_lower for kw in ['сравнива', 'выбира']):
-            insights.append("Decision-making process active")
+            insights.append("Высокий покупательский интерес")
+        if business_words:
+            insights.append(f"Бизнес-интерес: {', '.join(business_words)}")
+        if urgency_words:
+            insights.append(f"Срочность: {', '.join(urgency_words)}")
+        if decision_words:
+            insights.append(f"Роль в принятии решений: {', '.join(decision_words)}")
         return insights
     
     def _generate_actions(self, quality: str) -> List[str]:
         if quality == "hot":
-            return ["Immediate contact", "Prepare proposal", "Schedule demo"]
+            return ["Немедленный контакт", "Подготовить предложение", "Запланировать демо"]
         elif quality == "warm":
-            return ["Send information", "Follow up in 24h", "Qualify needs"]
+            return ["Отправить информацию", "Связаться в течение 24ч", "Уточнить потребности"]
         else:
-            return ["Add to nurturing", "Monitor activity"]
+            return ["Добавить в воронку", "Мониторить активность"]
     
     def _get_next_action(self, quality: str) -> str:
         if quality == "hot":
-            return "Contact within 15 minutes"
+            return "Связаться в течение 15 минут"
         elif quality == "warm":
-            return "Follow up within 2 hours"
+            return "Связаться в течение 2 часов"
         else:
-            return "Monitor for future engagement"
+            return "Мониторить будущую активность"
 
-# === УМНЫЙ ТРЕКЕР ДИАЛОГОВ (SOLID - Single Responsibility) ===
+# === ТРЕКЕР ДИАЛОГОВ С УЛУЧШЕННЫМ ЛОГИРОВАНИЕМ ===
 
 class SmartDialogueTracker:
-    """Оптимизированный трекер диалогов"""
+    """Трекер диалогов с подробным логированием"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.active_dialogues: Dict[str, DialogueContext] = {}
         self.message_cache: Dict[int, List[Dict[str, Any]]] = {}
         
-        # Настройки
-        self.window_size = 8  # Уменьшили с 10 до 8
-        self.dialogue_timeout = timedelta(minutes=15)  # Уменьшили с 20 до 15
+        self.window_size = 8
+        self.dialogue_timeout = timedelta(minutes=15)
         self.min_participants = 2
         
-        # Кэш для оптимизации
         self._business_signals_cache = {}
         
+        logger.info(f"🎭 Трекер диалогов инициализирован: окно={self.window_size}, таймаут={self.dialogue_timeout}")
+    
     async def track_message(self, update: Update) -> Optional[str]:
-        """Отслеживание сообщения"""
+        """Отслеживание сообщения с логированием"""
         try:
             chat_id = update.effective_chat.id
             user = update.effective_user
@@ -355,6 +377,12 @@ class SmartDialogueTracker:
             
             if not user or not message or not message.text:
                 return None
+            
+            # ИСПРАВЛЕНИЕ: Подробное логирование трекинга
+            logger.info(f"🎭 ТРЕКИНГ ДИАЛОГА:")
+            logger.info(f"   👤 Пользователь: {user.first_name} (@{user.username or 'no_username'}) ID:{user.id}")
+            logger.info(f"   💬 Сообщение: '{message.text[:100]}...' (длина: {len(message.text)})")
+            logger.info(f"   📺 Канал: {update.effective_chat.title} ID:{chat_id}")
             
             # Добавляем в кэш
             self._add_to_cache(chat_id, {
@@ -366,67 +394,80 @@ class SmartDialogueTracker:
                 'message_id': message.message_id
             })
             
-            # Анализируем контекст
+            # Анализируем тип разговора
             conversation_type = self._analyze_conversation_type(chat_id)
+            logger.info(f"   🔍 Тип разговора: {conversation_type}")
             
             if conversation_type == "individual":
+                logger.info("   👤 Определен как индивидуальное сообщение")
                 return None
             
             # Ищем или создаем диалог
             dialogue_id = await self._find_or_create_dialogue(chat_id, update.effective_chat.title)
             
             if dialogue_id:
+                logger.info(f"   🎭 Диалог: {dialogue_id}")
                 await self._update_dialogue(dialogue_id, user, message)
+                
+                # Логируем состояние диалога
+                dialogue = self.active_dialogues.get(dialogue_id)
+                if dialogue:
+                    logger.info(f"   📊 Участников: {len(dialogue.participants)}, "
+                              f"сообщений: {len(dialogue.messages)}, "
+                              f"бизнес-скор: {dialogue.business_score}")
             
-            # Очистка старых диалогов
             await self._cleanup_expired_dialogues()
             
             return dialogue_id
             
         except Exception as e:
-            logger.error(f"Error in dialogue tracking: {e}")
+            logger.error(f"❌ Ошибка трекинга диалога: {e}")
             return None
     
     def _add_to_cache(self, chat_id: int, message_data: Dict[str, Any]):
-        """Добавление сообщения в кэш с оптимизацией памяти"""
+        """Добавление сообщения в кэш"""
         if chat_id not in self.message_cache:
             self.message_cache[chat_id] = []
         
         cache = self.message_cache[chat_id]
         cache.append(message_data)
         
-        # Ограничиваем размер кэша
         if len(cache) > self.window_size:
             cache[:] = cache[-self.window_size:]
+        
+        logger.debug(f"💾 Кэш канала {chat_id}: {len(cache)} сообщений")
     
     def _analyze_conversation_type(self, chat_id: int) -> str:
-        """Быстрый анализ типа разговора"""
+        """Анализ типа разговора с логированием"""
         cache = self.message_cache.get(chat_id, [])
         
         if len(cache) < 2:
             return "individual"
         
-        recent_messages = cache[-6:]  # Анализируем только последние 6 сообщений
+        recent_messages = cache[-6:]
         unique_users = set(msg['user_id'] for msg in recent_messages)
         
+        logger.debug(f"🔍 Анализ разговора: {len(recent_messages)} сообщений, {len(unique_users)} пользователей")
+        
         if len(unique_users) >= 2:
-            # Проверяем на быстрые ответы
             quick_responses = 0
             for i in range(1, len(recent_messages)):
                 time_diff = recent_messages[i]['timestamp'] - recent_messages[i-1]['timestamp']
                 if time_diff <= timedelta(minutes=3) and recent_messages[i]['user_id'] != recent_messages[i-1]['user_id']:
                     quick_responses += 1
             
+            logger.debug(f"⚡ Быстрых ответов: {quick_responses}")
             return "dialogue" if quick_responses > 0 else "individual"
         
         return "individual"
     
     async def _find_or_create_dialogue(self, chat_id: int, chat_title: str) -> Optional[str]:
-        """Поиск или создание диалога"""
-        # Ищем активный диалог для канала
+        """Поиск или создание диалога с логированием"""
+        # Ищем активный диалог
         for dialogue_id, dialogue in self.active_dialogues.items():
             if (dialogue.channel_id == chat_id and 
                 datetime.now() - dialogue.last_activity < self.dialogue_timeout):
+                logger.debug(f"♻️ Найден существующий диалог: {dialogue_id}")
                 return dialogue_id
         
         # Создаем новый диалог
@@ -442,10 +483,11 @@ class SmartDialogueTracker:
             last_activity=datetime.now()
         )
         
+        logger.info(f"🆕 Создан новый диалог: {dialogue_id} в канале '{chat_title}'")
         return dialogue_id
     
     async def _update_dialogue(self, dialogue_id: str, user: User, message):
-        """Обновление диалога"""
+        """Обновление диалога с логированием"""
         dialogue = self.active_dialogues.get(dialogue_id)
         if not dialogue:
             return
@@ -458,15 +500,17 @@ class SmartDialogueTracker:
                 first_name=user.first_name,
                 last_name=user.last_name
             )
+            logger.info(f"👤 Новый участник диалога {dialogue_id}: {user.first_name} (ID: {user.id})")
         
         participant = dialogue.participants[user.id]
         participant.message_count += 1
         
-        # Анализируем покупательские сигналы (с кэшированием)
+        # Анализируем покупательские сигналы
         signals = self._get_buying_signals(message.text)
         if signals:
             participant.buying_signals.extend(signals)
             dialogue.business_score += len(signals) * 10
+            logger.info(f"🎯 Найдены покупательские сигналы: {signals} от {user.first_name}")
         
         # Добавляем сообщение
         dialogue.messages.append({
@@ -477,9 +521,11 @@ class SmartDialogueTracker:
         })
         
         dialogue.last_activity = datetime.now()
+        
+        logger.debug(f"📝 Диалог {dialogue_id} обновлен: +1 сообщение от {user.first_name}")
     
     def _get_buying_signals(self, text: str) -> List[str]:
-        """Получение покупательских сигналов с кэшированием"""
+        """Поиск покупательских сигналов с кэшированием"""
         text_hash = hash(text.lower())
         
         if text_hash in self._business_signals_cache:
@@ -489,11 +535,12 @@ class SmartDialogueTracker:
         text_lower = text.lower()
         
         signal_patterns = {
-            'purchase_intent': ['купить', 'заказать', 'приобрести'],
-            'price_inquiry': ['цена', 'стоимость', 'сколько стоит'],
-            'budget_discussion': ['бюджет', 'готовы потратить'],
-            'urgency': ['срочно', 'быстро', 'сегодня'],
-            'technical_interest': ['интеграция', 'api', 'техзадание']
+            'purchase_intent': ['купить', 'заказать', 'приобрести', 'хочу купить'],
+            'price_inquiry': ['цена', 'стоимость', 'сколько стоит', 'какая цена'],
+            'budget_discussion': ['бюджет', 'готовы потратить', 'есть деньги'],
+            'urgency': ['срочно', 'быстро', 'сегодня', 'немедленно'],
+            'technical_interest': ['интеграция', 'api', 'техзадание', 'требования'],
+            'decision_making': ['решаем', 'выбираем', 'принимаем решение']
         }
         
         for category, patterns in signal_patterns.items():
@@ -502,8 +549,7 @@ class SmartDialogueTracker:
         
         # Кэшируем результат
         self._business_signals_cache[text_hash] = signals
-        if len(self._business_signals_cache) > 200:  # Ограничиваем размер кэша
-            # Удаляем половину кэша
+        if len(self._business_signals_cache) > 200:
             items = list(self._business_signals_cache.items())
             self._business_signals_cache = dict(items[-100:])
         
@@ -518,102 +564,119 @@ class SmartDialogueTracker:
         ]
         
         for dialogue_id in expired:
-            self.active_dialogues.pop(dialogue_id, None)
-        
-        if expired:
-            logger.debug(f"Cleaned up {len(expired)} expired dialogues")
+            dialogue = self.active_dialogues.pop(dialogue_id, None)
+            if dialogue:
+                logger.info(f"🗑️ Диалог {dialogue_id} завершен (таймаут): "
+                          f"участников={len(dialogue.participants)}, "
+                          f"сообщений={len(dialogue.messages)}")
     
     def should_analyze_immediately(self, dialogue_id: str, message_text: str) -> bool:
         """Проверка на немедленный анализ"""
         ultra_triggers = [
             'готов купить', 'хочу заказать', 'сколько стоит',
-            'когда можем начать', 'есть бюджет'
+            'когда можем начать', 'есть бюджет', 'подпишем договор'
         ]
         
         text_lower = message_text.lower()
-        return any(trigger in text_lower for trigger in ultra_triggers)
+        has_trigger = any(trigger in text_lower for trigger in ultra_triggers)
+        
+        if has_trigger:
+            logger.info(f"⚡ НЕМЕДЛЕННЫЙ АНАЛИЗ: найден ультра-триггер в сообщении")
+        
+        return has_trigger
 
-# === УВЕДОМЛЕНИЯ (SOLID - Open/Closed Principle) ===
+# === УВЕДОМЛЕНИЯ С ИСПРАВЛЕНИЯМИ ===
 
-class BaseNotificationSender(ABC):
-    """Базовый класс для отправки уведомлений"""
-    
-    @abstractmethod
-    async def send_notification(self, notification_data: Dict[str, Any]) -> bool:
-        pass
-
-class TelegramNotificationSender(BaseNotificationSender):
-    """Отправка уведомлений через Telegram"""
+class TelegramNotificationSender:
+    """Исправленная отправка уведомлений через Telegram"""
     
     async def send_notification(self, notification_data: Dict[str, Any]) -> bool:
+        """Отправка уведомлений с подробным логированием"""
         try:
             context = notification_data.get('context')
             admin_ids = notification_data.get('admin_ids', [])
             message = notification_data.get('message', '')
             
-            if not context or not admin_ids or not message:
+            # ИСПРАВЛЕНИЕ: Подробная проверка данных
+            logger.info(f"📤 ОТПРАВКА УВЕДОМЛЕНИЯ:")
+            logger.info(f"   👑 Админов: {len(admin_ids)} {admin_ids}")
+            logger.info(f"   💬 Длина сообщения: {len(message)} символов")
+            logger.info(f"   🤖 Context доступен: {context is not None}")
+            
+            if not context:
+                logger.error("❌ Context не передан для уведомления")
+                return False
+            
+            if not admin_ids:
+                logger.error("❌ Список админов пуст")
+                return False
+            
+            if not message:
+                logger.error("❌ Текст уведомления пуст")
                 return False
             
             success_count = 0
             for admin_id in admin_ids:
                 try:
+                    logger.info(f"📤 Отправляем уведомление админу {admin_id}")
+                    
                     await context.bot.send_message(
                         chat_id=admin_id,
                         text=message,
-                        parse_mode=None
+                        parse_mode=None,  # ИСПРАВЛЕНИЕ: убираем parse_mode для избежания ошибок
+                        disable_web_page_preview=True
                     )
+                    
                     success_count += 1
+                    logger.info(f"✅ Уведомление отправлено админу {admin_id}")
+                    
                 except Exception as e:
-                    logger.error(f"Failed to send notification to {admin_id}: {e}")
+                    logger.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
             
+            logger.info(f"📊 Результат отправки: {success_count}/{len(admin_ids)} успешно")
             return success_count > 0
             
         except Exception as e:
-            logger.error(f"Failed to send Telegram notifications: {e}")
+            logger.error(f"❌ Критическая ошибка отправки уведомлений: {e}")
             return False
 
-class WebhookNotificationSender(BaseNotificationSender):
-    """Отправка уведомлений через webhook"""
-    
-    async def send_notification(self, notification_data: Dict[str, Any]) -> bool:
-        # Placeholder для webhook уведомлений
-        logger.info("Webhook notification would be sent here")
-        return True
-
-# === ГЛАВНЫЙ ПАРСЕР (SOLID - Dependency Inversion) ===
+# === ГЛАВНЫЙ ПАРСЕР С ИСПРАВЛЕНИЯМИ ===
 
 class OptimizedUnifiedParser:
-    """Оптимизированный парсер с инверсией зависимостей"""
+    """Исправленный парсер с подробным логированием"""
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.parsing_config = config.get('parsing', {})
         
-        # Основные настройки
         self.enabled = self.parsing_config.get('enabled', True)
         self.channels = self._parse_channels()
         self.min_confidence = self.parsing_config.get('min_confidence_score', 60)
         
-        # Инжекция зависимостей
+        # Инициализируем компоненты
         analyzer_type = "claude" if self._has_claude_api() else "simple"
-        self.message_analyzer = AnalyzerFactory.create_message_analyzer(analyzer_type)
-        self.notification_sender = NotificationFactory.create_sender("telegram")
+        self.message_analyzer = ClaudeMessageAnalyzer() if analyzer_type == "claude" else SimpleMessageAnalyzer()
+        self.notification_sender = TelegramNotificationSender()
         self.dialogue_tracker = SmartDialogueTracker(config)
         
-        # Статистика для мониторинга
+        # Статистика
         self.stats = {
             'messages_processed': 0,
             'dialogues_created': 0,
             'leads_generated': 0,
             'notifications_sent': 0,
-            'analysis_failures': 0
+            'analysis_failures': 0,
+            'notifications_failed': 0  # ИСПРАВЛЕНИЕ: добавили счетчик неудачных уведомлений
         }
         
-        # Кэш анализов для избежания дублирования
         self.analysis_cache: Dict[str, datetime] = {}
         self.cache_timeout = timedelta(minutes=5)
         
-        logger.info(f"Optimized parser initialized: analyzer={analyzer_type}, channels={len(self.channels)}")
+        logger.info(f"🚀 ПАРСЕР ИНИЦИАЛИЗИРОВАН:")
+        logger.info(f"   🔍 Анализатор: {analyzer_type}")
+        logger.info(f"   📺 Каналов: {len(self.channels)}")
+        logger.info(f"   ⚙️ Включен: {self.enabled}")
+        logger.info(f"   📊 Мин. уверенность: {self.min_confidence}%")
     
     def _parse_channels(self) -> List[str]:
         """Парсинг каналов из конфигурации"""
@@ -627,12 +690,15 @@ class OptimizedUnifiedParser:
     def _has_claude_api(self) -> bool:
         """Проверка доступности Claude API"""
         claude_key = self.config.get('claude', {}).get('api_key', '')
-        return bool(claude_key and claude_key != 'your_claude_api_key_here')
+        has_api = bool(claude_key and claude_key != 'your_claude_api_key_here')
+        logger.info(f"🧠 Claude API: {'доступен' if has_api else 'недоступен'}")
+        return has_api
     
     async def process_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Главная функция обработки сообщений"""
+        """Главная функция обработки сообщений с исправлениями"""
         try:
             if not self.enabled:
+                logger.debug("⏸️ Парсер отключен, пропускаем сообщение")
                 return
             
             chat_id = update.effective_chat.id
@@ -640,29 +706,46 @@ class OptimizedUnifiedParser:
             message = update.message
             
             if not user or not message or not message.text:
+                logger.debug("⏸️ Некорректное сообщение, пропускаем")
                 return
             
             self.stats['messages_processed'] += 1
             
+            # ИСПРАВЛЕНИЕ: Подробное логирование начала обработки
+            logger.info(f"🔄 ОБРАБОТКА СООБЩЕНИЯ #{self.stats['messages_processed']}:")
+            logger.info(f"   👤 От: {user.first_name} (@{user.username or 'no_username'}) ID:{user.id}")
+            logger.info(f"   📺 Канал: {update.effective_chat.title} ID:{chat_id}")
+            logger.info(f"   💬 Текст: '{message.text[:150]}...' (длина: {len(message.text)})")
+            
             # Проверяем мониторинг канала
             if not self.is_channel_monitored(chat_id, update.effective_chat.username):
+                logger.info(f"⏸️ Канал {chat_id} не мониторится, пропускаем")
                 return
+            
+            logger.info(f"✅ Канал мониторится, продолжаем обработку")
             
             # Трекинг диалога
             dialogue_id = await self.dialogue_tracker.track_message(update)
             
             if dialogue_id:
                 # Обработка в рамках диалога
+                logger.info(f"🎭 Сообщение добавлено в диалог: {dialogue_id}")
                 should_analyze = await self._should_analyze_dialogue(dialogue_id, message.text)
                 
                 if should_analyze:
+                    logger.info(f"🔍 Запускаем анализ диалога {dialogue_id}")
                     await self._analyze_dialogue(dialogue_id, context)
+                else:
+                    logger.info(f"⏸️ Диалог {dialogue_id} не готов для анализа")
             else:
                 # Индивидуальная обработка
+                logger.info(f"👤 Обрабатываем как индивидуальное сообщение")
                 await self._process_individual_message(user, message, context)
             
+            logger.info(f"✅ Обработка сообщения завершена")
+            
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА обработки сообщения: {e}")
             self.stats['analysis_failures'] += 1
     
     async def _should_analyze_dialogue(self, dialogue_id: str, message_text: str) -> bool:
@@ -674,6 +757,7 @@ class OptimizedUnifiedParser:
         if cache_key in self.analysis_cache:
             time_diff = now - self.analysis_cache[cache_key]
             if time_diff < self.cache_timeout:
+                logger.debug(f"⏸️ Анализ в кэше, пропускаем")
                 return False
         
         # Проверяем триггеры
@@ -681,11 +765,18 @@ class OptimizedUnifiedParser:
         
         dialogue = self.dialogue_tracker.active_dialogues.get(dialogue_id)
         if not dialogue:
+            logger.warning(f"⚠️ Диалог {dialogue_id} не найден")
             return False
         
         # Условия для анализа
         basic_ready = len(dialogue.participants) >= 2 and len(dialogue.messages) >= 3
         has_business_signals = dialogue.business_score > 0
+        
+        logger.info(f"🔍 Проверка готовности диалога:")
+        logger.info(f"   👥 Участников: {len(dialogue.participants)} (нужно >= 2)")
+        logger.info(f"   💬 Сообщений: {len(dialogue.messages)} (нужно >= 3)")
+        logger.info(f"   🎯 Бизнес-скор: {dialogue.business_score}")
+        logger.info(f"   ⚡ Ультра-триггер: {immediate_trigger}")
         
         should_analyze = basic_ready and (immediate_trigger or has_business_signals)
         
@@ -697,31 +788,47 @@ class OptimizedUnifiedParser:
                 if now - v < self.cache_timeout
             }
         
+        logger.info(f"📊 Решение: {'АНАЛИЗИРОВАТЬ' if should_analyze else 'НЕ АНАЛИЗИРОВАТЬ'}")
         return should_analyze
     
     async def _analyze_dialogue(self, dialogue_id: str, context: ContextTypes.DEFAULT_TYPE):
-        """Анализ диалога"""
+        """Анализ диалога с исправлениями"""
         try:
             dialogue = self.dialogue_tracker.active_dialogues.get(dialogue_id)
             if not dialogue:
+                logger.error(f"❌ Диалог {dialogue_id} не найден для анализа")
                 return
             
-            # Подготовка данных для анализа
-            participants_info = [
-                f"{p.display_name} (@{p.username or 'no_username'}): {p.message_count} messages"
-                for p in dialogue.participants.values()
-            ]
+            logger.info(f"🔍 НАЧИНАЕМ АНАЛИЗ ДИАЛОГА {dialogue_id}")
             
-            dialogue_history = [
-                f"[{msg['timestamp'].strftime('%H:%M')}] {dialogue.participants[msg['user_id']].display_name}: {msg['text']}"
-                for msg in dialogue.messages[-10:]  # Последние 10 сообщений
-            ]
+            # Подготовка данных для анализа
+            participants_info = []
+            for p in dialogue.participants.values():
+                info = f"{p.display_name} (@{p.username or 'no_username'}) ID:{p.user_id}: {p.message_count} сообщений"
+                if p.buying_signals:
+                    info += f", сигналы: {p.buying_signals}"
+                participants_info.append(info)
+            
+            dialogue_history = []
+            for msg in dialogue.messages[-10:]:  # Последние 10 сообщений
+                participant = dialogue.participants.get(msg['user_id'])
+                display_name = participant.display_name if participant else f"User_{msg['user_id']}"
+                time_str = msg['timestamp'].strftime('%H:%M')
+                signals_str = f" [сигналы: {msg['signals']}]" if msg['signals'] else ""
+                dialogue_history.append(f"[{time_str}] {display_name}: {msg['text']}{signals_str}")
             
             analysis_context = {
+                'channel_title': dialogue.channel_title,
                 'participants_info': '\n'.join(participants_info),
                 'dialogue_history': '\n'.join(dialogue_history),
                 'current_user_id': dialogue.messages[-1]['user_id'] if dialogue.messages else 0
             }
+            
+            # ИСПРАВЛЕНИЕ: Логируем контекст анализа
+            logger.info(f"📋 Контекст анализа:")
+            logger.info(f"   📺 Канал: {dialogue.channel_title}")
+            logger.info(f"   👥 Участников в контексте: {len(participants_info)}")
+            logger.info(f"   💬 Сообщений в истории: {len(dialogue_history)}")
             
             # Анализируем последнее сообщение
             last_message = dialogue.messages[-1]['text'] if dialogue.messages else ""
@@ -729,30 +836,38 @@ class OptimizedUnifiedParser:
             
             # Обрабатываем результат
             if analysis_result.get('is_valuable_dialogue', False):
+                logger.info(f"💎 Диалог признан ценным, обрабатываем результат")
                 await self._process_dialogue_result(dialogue, analysis_result, context)
+            else:
+                logger.info(f"📊 Диалог не признан ценным (уверенность: {analysis_result.get('confidence_score', 0)}%)")
             
         except Exception as e:
-            logger.error(f"Error analyzing dialogue {dialogue_id}: {e}")
+            logger.error(f"❌ ОШИБКА анализа диалога {dialogue_id}: {e}")
             self.stats['analysis_failures'] += 1
     
     async def _process_dialogue_result(self, dialogue: DialogueContext, 
                                      analysis_result: Dict[str, Any], 
                                      context: ContextTypes.DEFAULT_TYPE):
-        """Обработка результатов анализа диалога"""
+        """Обработка результатов анализа диалога с исправлениями"""
         try:
             confidence = analysis_result.get('confidence_score', 0)
             business_relevance = analysis_result.get('business_relevance_score', 0)
             potential_leads = analysis_result.get('potential_leads', [])
-            
-            # Гибкие критерии для уведомлений
             priority_level = analysis_result.get('priority_level', 'medium')
             
+            logger.info(f"📊 РЕЗУЛЬТАТ АНАЛИЗА ДИАЛОГА:")
+            logger.info(f"   🎯 Уверенность: {confidence}%")
+            logger.info(f"   🏢 Бизнес-релевантность: {business_relevance}%")
+            logger.info(f"   👥 Потенциальных лидов: {len(potential_leads)}")
+            logger.info(f"   ⚡ Приоритет: {priority_level}")
+            
+            # ИСПРАВЛЕНИЕ: Более гибкие критерии для уведомлений
             if priority_level == 'urgent':
-                min_confidence, min_business = 50, 60  # Сниженные требования для срочных
+                min_confidence, min_business = 40, 50  # Снижены для срочных
             elif priority_level == 'high':
-                min_confidence, min_business = 60, 65
+                min_confidence, min_business = 50, 60
             else:
-                min_confidence, min_business = 70, 75  # Стандартные требования
+                min_confidence, min_business = 60, 70
             
             should_notify = (
                 confidence >= min_confidence and
@@ -760,62 +875,54 @@ class OptimizedUnifiedParser:
                 len(potential_leads) > 0
             )
             
+            logger.info(f"📋 Критерии уведомления:")
+            logger.info(f"   📊 Уверенность: {confidence}% >= {min_confidence}% ✅" if confidence >= min_confidence else f"   📊 Уверенность: {confidence}% < {min_confidence}% ❌")
+            logger.info(f"   🏢 Бизнес: {business_relevance}% >= {min_business}% ✅" if business_relevance >= min_business else f"   🏢 Бизнес: {business_relevance}% < {min_business}% ❌")
+            logger.info(f"   👥 Лиды: {len(potential_leads)} > 0 ✅" if len(potential_leads) > 0 else f"   👥 Лиды: {len(potential_leads)} = 0 ❌")
+            logger.info(f"   🚨 ОТПРАВЛЯТЬ УВЕДОМЛЕНИЕ: {'ДА' if should_notify else 'НЕТ'}")
+            
             if should_notify:
                 # Создаем лиды
                 created_leads = []
                 for lead_data in potential_leads:
-                    if lead_data.get('lead_probability', 0) >= 50:  # Мин. порог для создания лида
+                    if lead_data.get('lead_probability', 0) >= 40:  # ИСПРАВЛЕНИЕ: снизили порог
                         lead = await self._create_dialogue_lead(dialogue, lead_data, analysis_result)
                         if lead:
                             created_leads.append(lead)
                 
                 # Отправляем уведомление
                 if created_leads:
-                    await self._send_dialogue_notification(dialogue, analysis_result, created_leads, context)
-                    self.stats['notifications_sent'] += 1
+                    notification_success = await self._send_dialogue_notification(dialogue, analysis_result, created_leads, context)
+                    if notification_success:
+                        self.stats['notifications_sent'] += 1
+                        logger.info(f"✅ Уведомление о диалоге отправлено успешно")
+                    else:
+                        self.stats['notifications_failed'] += 1
+                        logger.error(f"❌ Не удалось отправить уведомление о диалоге")
+                    
                     self.stats['leads_generated'] += len(created_leads)
+                    logger.info(f"🎯 Создано лидов: {len(created_leads)}")
+                else:
+                    logger.warning(f"⚠️ Потенциальные лиды не прошли валидацию для создания")
+            else:
+                logger.info(f"⏸️ Уведомление не отправляем - не соответствует критериям")
             
         except Exception as e:
-            logger.error(f"Error processing dialogue result: {e}")
-    
-    async def _process_individual_message(self, user: User, message, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка индивидуального сообщения"""
-        try:
-            # Простой анализ для индивидуальных сообщений
-            analysis_context = {
-                'current_user_id': user.id,
-                'participants_info': f"{user.first_name} (@{user.username or 'no_username'})",
-                'dialogue_history': f"Individual message: {message.text}"
-            }
-            
-            analysis_result = await self.message_analyzer.analyze(message.text, analysis_context)
-            
-            # Создаем лид если достаточно высокий скор
-            potential_leads = analysis_result.get('potential_leads', [])
-            for lead_data in potential_leads:
-                if lead_data.get('lead_probability', 0) >= 70:  # Высокий порог для индивидуальных
-                    lead = await self._create_individual_lead(user, message, lead_data)
-                    if lead:
-                        self.stats['leads_generated'] += 1
-                        
-                        # Отправляем уведомление о горячем индивидуальном лиде
-                        if lead_data.get('lead_probability', 0) >= 85:
-                            await self._send_individual_notification(user, message, lead_data, context)
-                            self.stats['notifications_sent'] += 1
-            
-        except Exception as e:
-            logger.error(f"Error processing individual message: {e}")
+            logger.error(f"❌ ОШИБКА обработки результата диалога: {e}")
     
     async def _create_dialogue_lead(self, dialogue: DialogueContext, 
                                   lead_data: Dict[str, Any], 
                                   analysis_result: Dict[str, Any]) -> Optional[Lead]:
-        """Создание лида из диалога"""
+        """Создание лида из диалога с логированием"""
         try:
             user_id = lead_data.get('user_id')
             participant = dialogue.participants.get(user_id)
             
             if not participant:
+                logger.error(f"❌ Участник {user_id} не найден в диалоге")
                 return None
+            
+            logger.info(f"🎯 Создаем лида: {participant.display_name} (ID: {user_id})")
             
             lead = Lead(
                 telegram_id=participant.user_id,
@@ -836,12 +943,50 @@ class OptimizedUnifiedParser:
             )
             
             await create_lead(lead)
-            logger.info(f"Dialogue lead created: {participant.display_name} ({lead_data.get('lead_probability', 0)}%)")
+            logger.info(f"✅ Лид создан: {participant.display_name} ({lead_data.get('lead_probability', 0)}%)")
             return lead
             
         except Exception as e:
-            logger.error(f"Error creating dialogue lead: {e}")
+            logger.error(f"❌ Ошибка создания лида из диалога: {e}")
             return None
+    
+    async def _process_individual_message(self, user: User, message, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка индивидуального сообщения с логированием"""
+        try:
+            logger.info(f"👤 АНАЛИЗ ИНДИВИДУАЛЬНОГО СООБЩЕНИЯ:")
+            logger.info(f"   🧑 Пользователь: {user.first_name} (ID: {user.id})")
+            logger.info(f"   💬 Сообщение: '{message.text[:100]}...'")
+            
+            analysis_context = {
+                'current_user_id': user.id,
+                'participants_info': f"{user.first_name} (@{user.username or 'no_username'})",
+                'dialogue_history': f"Individual message: {message.text}"
+            }
+            
+            analysis_result = await self.message_analyzer.analyze(message.text, analysis_context)
+            
+            # Создаем лид если достаточно высокий скор
+            potential_leads = analysis_result.get('potential_leads', [])
+            for lead_data in potential_leads:
+                lead_probability = lead_data.get('lead_probability', 0)
+                if lead_probability >= 60:  # ИСПРАВЛЕНИЕ: снизили порог для индивидуальных
+                    lead = await self._create_individual_lead(user, message, lead_data)
+                    if lead:
+                        self.stats['leads_generated'] += 1
+                        logger.info(f"🎯 Создан индивидуальный лид: {user.first_name} ({lead_probability}%)")
+                        
+                        # Отправляем уведомление о горячем индивидуальном лиде
+                        if lead_probability >= 80:
+                            notification_success = await self._send_individual_notification(user, message, lead_data, context)
+                            if notification_success:
+                                self.stats['notifications_sent'] += 1
+                                logger.info(f"✅ Уведомление об индивидуальном лиде отправлено")
+                            else:
+                                self.stats['notifications_failed'] += 1
+                                logger.error(f"❌ Не удалось отправить уведомление об индивидуальном лиде")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки индивидуального сообщения: {e}")
     
     async def _create_individual_lead(self, user: User, message, lead_data: Dict[str, Any]) -> Optional[Lead]:
         """Создание индивидуального лида"""
@@ -862,11 +1007,10 @@ class OptimizedUnifiedParser:
             )
             
             await create_lead(lead)
-            logger.info(f"Individual lead created: {user.first_name} ({lead_data.get('lead_probability', 0)}%)")
             return lead
             
         except Exception as e:
-            logger.error(f"Error creating individual lead: {e}")
+            logger.error(f"❌ Ошибка создания индивидуального лида: {e}")
             return None
     
     def _get_participant_messages(self, dialogue: DialogueContext, user_id: int) -> str:
@@ -880,14 +1024,14 @@ class OptimizedUnifiedParser:
     async def _send_dialogue_notification(self, dialogue: DialogueContext, 
                                         analysis_result: Dict[str, Any],
                                         created_leads: List[Lead],
-                                        context: ContextTypes.DEFAULT_TYPE):
-        """Отправка уведомления о диалоге"""
+                                        context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Отправка уведомления о диалоге с исправлениями"""
         try:
             confidence = analysis_result.get('confidence_score', 0)
             business_relevance = analysis_result.get('business_relevance_score', 0)
             priority = analysis_result.get('priority_level', 'medium')
             
-            # Формируем сообщение
+            # ИСПРАВЛЕНИЕ: Более читаемое форматирование уведомления
             priority_emoji = "🚨" if priority == "urgent" else "🔥" if priority == "high" else "💎"
             
             message = f"""{priority_emoji} ЦЕННЫЙ ДИАЛОГ ({priority.upper()})
@@ -902,13 +1046,22 @@ class OptimizedUnifiedParser:
 
 📋 Суть: {analysis_result.get('dialogue_summary', 'N/A')}
 
-💡 Ключевые инсайты:
-{chr(10).join(f'• {insight}' for insight in analysis_result.get('key_insights', []))}
+💡 Ключевые инсайты:"""
 
-🎯 Рекомендации:
-{chr(10).join(f'• {action}' for action in analysis_result.get('recommended_actions', []))}
+            for insight in analysis_result.get('key_insights', []):
+                message += f"\n• {insight}"
 
-⚡️ Следующий шаг: {analysis_result.get('next_best_action', 'Review manually')}"""
+            message += f"\n\n🎯 Рекомендации:"
+            for action in analysis_result.get('recommended_actions', []):
+                message += f"\n• {action}"
+
+            message += f"\n\n⚡️ Следующий шаг: {analysis_result.get('next_best_action', 'Review manually')}"
+            
+            # Добавляем информацию о лидах
+            if created_leads:
+                message += f"\n\n👤 Созданные лиды:"
+                for lead in created_leads:
+                    message += f"\n• {lead.first_name} (@{lead.username or 'no_username'}) - {lead.interest_score}%"
 
             notification_data = {
                 'context': context,
@@ -916,14 +1069,17 @@ class OptimizedUnifiedParser:
                 'message': message
             }
             
-            await self.notification_sender.send_notification(notification_data)
+            logger.info(f"📤 Подготовлено уведомление о диалоге длиной {len(message)} символов")
+            
+            return await self.notification_sender.send_notification(notification_data)
             
         except Exception as e:
-            logger.error(f"Error sending dialogue notification: {e}")
+            logger.error(f"❌ Ошибка отправки уведомления о диалоге: {e}")
+            return False
     
     async def _send_individual_notification(self, user: User, message, 
                                           lead_data: Dict[str, Any], 
-                                          context: ContextTypes.DEFAULT_TYPE):
+                                          context: ContextTypes.DEFAULT_TYPE) -> bool:
         """Отправка уведомления об индивидуальном лиде"""
         try:
             probability = lead_data.get('lead_probability', 0)
@@ -932,14 +1088,16 @@ class OptimizedUnifiedParser:
             notification_text = f"""🚨 ГОРЯЧИЙ ИНДИВИДУАЛЬНЫЙ ЛИД!
 
 👤 Пользователь: {user.first_name} (@{user.username or 'no_username'})
-💬 Сообщение: "{message.text}"
+💬 Сообщение: "{message.text[:200]}..."
 📊 Вероятность: {probability}%
 🎯 Качество: {quality.upper()}
 
-🔥 Покупательские сигналы:
-{chr(10).join(f'• {signal}' for signal in lead_data.get('key_signals', []))}
+🔥 Покупательские сигналы:"""
 
-⚡️ ДЕЙСТВУЙТЕ БЫСТРО: Свяжитесь в течение 15 минут!"""
+            for signal in lead_data.get('key_signals', []):
+                notification_text += f"\n• {signal}"
+
+            notification_text += f"\n\n⚡️ ДЕЙСТВУЙТЕ БЫСТРО: Свяжитесь в течение 15 минут!"
 
             notification_data = {
                 'context': context,
@@ -947,10 +1105,11 @@ class OptimizedUnifiedParser:
                 'message': notification_text
             }
             
-            await self.notification_sender.send_notification(notification_data)
+            return await self.notification_sender.send_notification(notification_data)
             
         except Exception as e:
-            logger.error(f"Error sending individual notification: {e}")
+            logger.error(f"❌ Ошибка отправки индивидуального уведомления: {e}")
+            return False
     
     def is_channel_monitored(self, chat_id: int, chat_username: str = None) -> bool:
         """Проверка мониторинга канала"""
@@ -972,7 +1131,7 @@ class OptimizedUnifiedParser:
         """Получение статуса парсера"""
         return {
             'enabled': self.enabled,
-            'mode': 'optimized_unified',
+            'mode': 'optimized_unified_fixed',
             'channels_count': len(self.channels),
             'channels': self.channels,
             'min_confidence_score': self.min_confidence,
@@ -996,6 +1155,7 @@ class OptimizedUnifiedParser:
             'messages_processed': total_processed,
             'leads_conversion_rate': (self.stats['leads_generated'] / total_processed) * 100,
             'notification_rate': (self.stats['notifications_sent'] / total_processed) * 100,
+            'notification_success_rate': (self.stats['notifications_sent'] / max(self.stats['notifications_sent'] + self.stats['notifications_failed'], 1)) * 100,
             'error_rate': (self.stats['analysis_failures'] / total_processed) * 100,
             'dialogues_per_message': self.stats['dialogues_created'] / total_processed,
             'cache_efficiency': len(self.analysis_cache)
@@ -1003,20 +1163,3 @@ class OptimizedUnifiedParser:
 
 # Алиасы для совместимости
 UnifiedAIParser = OptimizedUnifiedParser
-DialogueTracker = SmartDialogueTracker
-DialogueAnalyzer = ClaudeMessageAnalyzer
-
-# Экспорт классов
-__all__ = [
-    'OptimizedUnifiedParser',
-    'UnifiedAIParser', 
-    'SmartDialogueTracker',
-    'DialogueTracker',
-    'ClaudeMessageAnalyzer',
-    'DialogueAnalyzer',
-    'AnalyzerFactory',
-    'NotificationFactory',
-    'ParticipantInfo',
-    'DialogueContext',
-    'AnalysisResult'
-]
